@@ -1,0 +1,14 @@
+[Unit]
+Description=Virtual display for the official eXpress Linux client
+Before=openclaw-express-client.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/Xvfb :97 -screen 0 1600x1000x24 -nolisten tcp -ac
+Restart=always
+RestartSec=3s
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,29 @@
+[Unit]
+Description=Official eXpress Linux client for the OpenClaw desktop bridge
+Requires=openclaw-express-xvfb.service openclaw-express-keyring.service
+After=openclaw-express-xvfb.service openclaw-express-keyring.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/.local/share/openclaw-express-bridge/client/appdir
+Environment=DISPLAY=:97
+Environment=HOME=%h/.local/share/openclaw-express-bridge/profile/home
+Environment=XDG_CONFIG_HOME=%h/.local/share/openclaw-express-bridge/profile/config
+Environment=XDG_DATA_HOME=%h/.local/share/openclaw-express-bridge/profile/data
+Environment=XDG_CACHE_HOME=%h/.local/share/openclaw-express-bridge/profile/cache
+Environment=XDG_RUNTIME_DIR=%t
+Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=%t/bus
+Environment=GNOME_KEYRING_CONTROL=%t/openclaw-express-keyring
+Environment=APPDIR=%h/.local/share/openclaw-express-bridge/client/appdir
+Environment=APPIMAGE=%h/.local/share/openclaw-express-bridge/client/eXpress.AppImage
+ExecStart=%h/.local/share/openclaw-express-bridge/client/appdir/AppRun --no-sandbox --disable-gpu --disable-dev-shm-usage --password-store=basic --remote-debugging-address=127.0.0.1 --remote-debugging-port=18997
+Restart=always
+RestartSec=5s
+TimeoutStopSec=20s
+KillMode=mixed
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=default.target

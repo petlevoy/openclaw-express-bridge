@@ -1,0 +1,436 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT=""
+SCRIPT_PATH=$(readlink -f "$0")
+SCRIPT_PARENT=$(cd "$(dirname "$SCRIPT_PATH")/.." && pwd)
+if [[ -n "${OPENCLAW_EXPRESS_BRIDGE_ROOT:-}" ]]; then
+  ROOT=$OPENCLAW_EXPRESS_BRIDGE_ROOT
+elif [[ -d "$SCRIPT_PARENT/plugin" ]]; then
+  ROOT=$SCRIPT_PARENT
+else
+  ROOT=/usr/lib/openclaw-express-bridge
+fi
+# shellcheck source=../lib/common.sh
+source "$ROOT/lib/common.sh"
+
+VERSION=$(<"$ROOT/VERSION")
+STATE_HOME=${XDG_STATE_HOME:-"$HOME/.local/state"}
+CONFIG_HOME=${XDG_CONFIG_HOME:-"$HOME/.config"}
+BRIDGE_HOME=${OPENCLAW_EXPRESS_BRIDGE_HOME:-"$HOME/.local/share/openclaw-express-bridge"}
+RUNTIME_HOME="$BRIDGE_HOME/runtime"
+CLIENT_HOME="$BRIDGE_HOME/client"
+PROFILE_HOME="$BRIDGE_HOME/profile"
+BACKUP_HOME="$BRIDGE_HOME/backups"
+STATE_DIR="$STATE_HOME/openclaw-express-bridge"
+OPENCLAW_HOME=${OPENCLAW_HOME:-"$HOME/.openclaw"}
+PLUGIN_DEST="$OPENCLAW_HOME/extensions/openclaw-express"
+UNIT_DIR="$CONFIG_HOME/systemd/user"
+SWITCH_PATH="$BRIDGE_HOME/state/outbound.enabled"
+DESKTOP_STATE_PATH="$BRIDGE_HOME/state/desktop-state.json"
+CDP_URL=http://127.0.0.1:18997
+
+usage() {
+  cat <<EOF
+openclaw-express-bridge $VERSION
+
+Usage: openclaw-express-bridge COMMAND [OPTIONS]
+
+Commands:
+  install [--dry-run] [--client FILE]  Install the per-user bridge
+  install-client [FILE]                Install/extract official eXpress AppImage
+  configure [OPTIONS]                  Set exact chat/sender allowlist
+  login                                Start client and save a login screenshot
+  status                               Show services, client, config and safety state
+  probe                                Read-only CDP/OpenClaw health check
+  enable-outbound [--no-restart]       Open both outbound safety gates
+  disable-outbound [--no-restart]      Close both outbound safety gates
+  backup [OUTPUT.tar.gz]               Back up profile, keyring and channel config
+  restore BACKUP.tar.gz                Restore a bridge backup
+  uninstall [--purge]                  Remove integration; keep data unless --purge
+  version                              Print version
+
+Configure options:
+  --chat-id UUID --chat-title TEXT --sender-id UUID [--sender-name TEXT]
+  --non-interactive                    Fail rather than prompt for missing values
+
+The official client is not part of redistributable builds. install-client with
+no FILE downloads the pinned version from updates.express.ms and verifies SHA256.
+Outbound is fail-closed after install, configure and restore.
+EOF
+}
+
+copy_runtime() {
+  install -d -m 700 "$RUNTIME_HOME"
+  install -d -m 755 "$RUNTIME_HOME"/{bin,lib,helpers,systemd,plugin}
+  cp -a "$ROOT/bin/." "$RUNTIME_HOME/bin/"
+  cp -a "$ROOT/lib/." "$RUNTIME_HOME/lib/"
+  cp -a "$ROOT/helpers/." "$RUNTIME_HOME/helpers/"
+  cp -a "$ROOT/systemd/." "$RUNTIME_HOME/systemd/"
+  cp -a "$ROOT/plugin/." "$RUNTIME_HOME/plugin/"
+  install -m 644 "$ROOT/VERSION" "$ROOT/LICENSE" "$ROOT/client.env" "$RUNTIME_HOME/"
+}
+
+write_wrapper() {
+  local local_bin="$HOME/.local/bin"
+  install -d -m 755 "$local_bin"
+  local wrapper="$local_bin/openclaw-express-bridge"
+  printf '#!/usr/bin/env bash\nexport OPENCLAW_EXPRESS_BRIDGE_ROOT=%q\nexec %q "$@"\n' \
+    "$RUNTIME_HOME" "$RUNTIME_HOME/bin/openclaw-express-bridge" > "$wrapper"
+  chmod 755 "$wrapper"
+}
+
+install_plugin() {
+  install -d -m 700 "$OPENCLAW_HOME/extensions"
+  if [[ -e "$PLUGIN_DEST" && ! -e "$BRIDGE_HOME/install-backup/openclaw-express" ]]; then
+    install -d -m 700 "$BRIDGE_HOME/install-backup"
+    cp -a "$PLUGIN_DEST" "$BRIDGE_HOME/install-backup/openclaw-express"
+  fi
+  rm -rf "$PLUGIN_DEST.new"
+  cp -a "$RUNTIME_HOME/plugin" "$PLUGIN_DEST.new"
+  rm -rf "$PLUGIN_DEST"
+  mv "$PLUGIN_DEST.new" "$PLUGIN_DEST"
+}
+
+install_units() {
+  install -d -m 755 "$UNIT_DIR"
+  install -m 644 "$RUNTIME_HOME/systemd/"*.service "$UNIT_DIR/"
+  systemctl --user daemon-reload
+  systemctl --user enable openclaw-express-xvfb.service \
+    openclaw-express-keyring.service openclaw-express-client.service >/dev/null
+}
+
+init_data() {
+  install -d -m 700 "$BRIDGE_HOME" "$CLIENT_HOME" "$PROFILE_HOME" \
+    "$PROFILE_HOME"/{home,config,data,cache} "$BRIDGE_HOME/credentials" \
+    "$BRIDGE_HOME/state" "$BACKUP_HOME" "$STATE_DIR"
+  if [[ ! -s "$BRIDGE_HOME/credentials/keyring-password" ]]; then
+    umask 077
+    python3 - <<'PY' > "$BRIDGE_HOME/credentials/keyring-password"
+import secrets
+print(secrets.token_hex(32))
+PY
+  fi
+  chmod 600 "$BRIDGE_HOME/credentials/keyring-password"
+  rm -f "$SWITCH_PATH"
+}
+
+configure_skeleton() {
+  bridge_have openclaw || return 0
+  openclaw plugins enable openclaw-express >/dev/null 2>&1 || true
+  if [[ -n "$(bridge_config_get channels.express)" ]]; then
+    rm -f "$SWITCH_PATH"
+    openclaw config set channels.express.desktopOutboundEnabled false --strict-json >/dev/null
+    bridge_note "Existing eXpress channel preserved; outbound forced OFF."
+    return
+  fi
+  local json
+  json=$(python3 - "$DESKTOP_STATE_PATH" "$SWITCH_PATH" <<'PY'
+import json,sys
+print(json.dumps({
+  "enabled": False,
+  "mode": "desktop",
+  "dmPolicy": "allowlist",
+  "allowFrom": [],
+  "desktopCdpUrl": "http://127.0.0.1:18997",
+  "desktopPollIntervalMs": 1000,
+  "desktopStatePath": sys.argv[1],
+  "desktopOutboundEnabled": False,
+  "desktopOutboundSwitchPath": sys.argv[2],
+}, separators=(",", ":")))
+PY
+)
+  openclaw config set channels.express "$json" --strict-json >/dev/null
+}
+
+cmd_install() {
+  local dry_run=false client_file=""
+  while (($#)); do
+    case "$1" in
+      --dry-run) dry_run=true ;;
+      --client) shift; [[ $# -gt 0 ]] || bridge_die "--client needs a file"; client_file=$1 ;;
+      *) bridge_die "unknown install option: $1" ;;
+    esac
+    shift
+  done
+  bridge_require bash python3
+  if [[ "$dry_run" == true ]]; then
+    bridge_note "DRY-RUN install root=$ROOT"
+    bridge_note "DRY-RUN data=$BRIDGE_HOME"
+    bridge_note "DRY-RUN plugin=$PLUGIN_DEST"
+    bridge_note "DRY-RUN units=$UNIT_DIR"
+    [[ -z "$client_file" ]] || bridge_note "DRY-RUN client=$client_file"
+    bridge_note "DRY-RUN outbound=false; allowlist=[]; services not started"
+    return
+  fi
+  bridge_require install cp mv rm systemctl openclaw node
+  copy_runtime
+  write_wrapper
+  init_data
+  install_plugin
+  install_units
+  configure_skeleton
+  if [[ -n "$client_file" ]]; then
+    cmd_install_client "$client_file"
+  elif [[ -f "$ROOT/client/eXpress.AppImage" ]]; then
+    cmd_install_client "$ROOT/client/eXpress.AppImage"
+  fi
+  bridge_note "Installed openclaw-express-bridge $VERSION for user $(id -un)."
+  bridge_note "Outbound is OFF. Next: openclaw-express-bridge install-client; then login; then configure."
+}
+
+cmd_install_client() {
+  source "$ROOT/client.env"
+  local source_file=${1:-} temp="" downloaded=false
+  bridge_require sha256sum install rm
+  install -d -m 700 "$CLIENT_HOME"
+  if [[ -z "$source_file" ]]; then
+    bridge_require curl
+    temp=$(mktemp "$CLIENT_HOME/.client.XXXXXX")
+    downloaded=true
+    bridge_note "Downloading official eXpress $EXPRESS_CLIENT_VERSION from updates.express.ms..."
+    curl --fail --location --proto '=https' --tlsv1.2 --output "$temp" "$EXPRESS_CLIENT_URL"
+    source_file=$temp
+  fi
+  [[ -f "$source_file" ]] || bridge_die "client file not found: $source_file"
+  local actual
+  actual=$(sha256sum "$source_file" | awk '{print $1}')
+  [[ "$actual" == "$EXPRESS_CLIENT_SHA256" ]] || \
+    bridge_die "client SHA256 mismatch: expected $EXPRESS_CLIENT_SHA256, got $actual"
+  install -m 700 "$source_file" "$CLIENT_HOME/eXpress.AppImage.new"
+  rm -rf "$CLIENT_HOME/appdir.new"
+  install -d -m 700 "$CLIENT_HOME/appdir.new"
+  (
+    cd "$CLIENT_HOME/appdir.new"
+    "$CLIENT_HOME/eXpress.AppImage.new" --appimage-extract >/dev/null
+    mv squashfs-root/* .
+    rmdir squashfs-root
+  )
+  rm -rf "$CLIENT_HOME/appdir"
+  mv "$CLIENT_HOME/appdir.new" "$CLIENT_HOME/appdir"
+  mv "$CLIENT_HOME/eXpress.AppImage.new" "$CLIENT_HOME/eXpress.AppImage"
+  [[ "$downloaded" == false ]] || rm -f "$temp"
+  bridge_note "Official client installed and verified: $CLIENT_HOME/eXpress.AppImage"
+}
+
+cmd_configure() {
+  local chat_id="" chat_title="" sender_id="" sender_name="" non_interactive=false
+  while (($#)); do
+    case "$1" in
+      --chat-id) shift; chat_id=${1:-} ;;
+      --chat-title) shift; chat_title=${1:-} ;;
+      --sender-id) shift; sender_id=${1:-} ;;
+      --sender-name) shift; sender_name=${1:-} ;;
+      --non-interactive) non_interactive=true ;;
+      *) bridge_die "unknown configure option: $1" ;;
+    esac
+    shift
+  done
+  bridge_require openclaw python3
+  if [[ "$non_interactive" == false ]]; then
+    [[ -n "$chat_id" ]] || read -r -p "Exact eXpress chat UUID: " chat_id
+    [[ -n "$chat_title" ]] || read -r -p "Exact eXpress chat title: " chat_title
+    [[ -n "$sender_id" ]] || read -r -p "Exact allowed sender UUID: " sender_id
+    [[ -n "$sender_name" ]] || read -r -p "Sender display name (optional): " sender_name
+  fi
+  bridge_is_uuid "$chat_id" || bridge_die "invalid chat UUID"
+  bridge_is_uuid "$sender_id" || bridge_die "invalid sender UUID"
+  [[ -n "$chat_title" ]] || bridge_die "chat title must not be empty"
+  [[ -n "$sender_name" ]] || sender_name=$chat_title
+  local json
+  json=$(python3 - "$chat_id" "$chat_title" "$sender_id" "$sender_name" \
+    "$DESKTOP_STATE_PATH" "$SWITCH_PATH" <<'PY'
+import json,sys
+chat_id,title,sender_id,sender_name,state_path,switch_path=sys.argv[1:]
+print(json.dumps({
+  "enabled": True,
+  "mode": "desktop",
+  "dmPolicy": "allowlist",
+  "allowFrom": [sender_id, chat_id],
+  "desktopCdpUrl": "http://127.0.0.1:18997",
+  "desktopChatId": chat_id,
+  "desktopChatTitle": title,
+  "desktopSenderId": sender_id,
+  "desktopSenderName": sender_name,
+  "desktopPollIntervalMs": 1000,
+  "desktopStatePath": state_path,
+  "desktopOutboundEnabled": False,
+  "desktopOutboundSwitchPath": switch_path,
+}, separators=(",", ":")))
+PY
+)
+  rm -f "$SWITCH_PATH"
+  openclaw config set channels.express "$json" --strict-json >/dev/null
+  openclaw config validate >/dev/null
+  bridge_note "Configured exact sender/chat allowlist. Outbound remains OFF."
+  bridge_note "Restart the gateway to load the new channel configuration."
+}
+
+wait_for_cdp() {
+  local tries=${1:-40}
+  for ((i=0; i<tries; i++)); do
+    curl -fsS "$CDP_URL/json/version" >/dev/null 2>&1 && return 0
+    sleep 0.5
+  done
+  return 1
+}
+
+cmd_login() {
+  [[ -x "$CLIENT_HOME/appdir/AppRun" ]] || bridge_die "client is not installed; run install-client"
+  bridge_require systemctl curl node
+  systemctl --user start openclaw-express-xvfb.service openclaw-express-keyring.service \
+    openclaw-express-client.service
+  wait_for_cdp 60 || bridge_die "client CDP did not become ready on $CDP_URL"
+  local output="$STATE_DIR/login-$(date -u +%Y%m%dT%H%M%SZ).png"
+  install -d -m 700 "$STATE_DIR"
+  EXPRESS_CDP_URL=$CDP_URL node "$ROOT/helpers/cdp-screenshot.mjs" "$output" >/dev/null
+  bridge_note "Login screen saved to: $output"
+  bridge_note "Open the PNG, complete eXpress login, then run: openclaw-express-bridge probe"
+}
+
+service_state() {
+  systemctl --user is-active "$1" 2>/dev/null || true
+}
+
+cmd_status() {
+  printf 'openclaw-express-bridge=%s\n' "$VERSION"
+  printf 'client=%s\n' "$( [[ -x "$CLIENT_HOME/appdir/AppRun" ]] && echo installed || echo missing )"
+  printf 'xvfb=%s\n' "$(service_state openclaw-express-xvfb.service)"
+  printf 'keyring=%s\n' "$(service_state openclaw-express-keyring.service)"
+  printf 'express_client=%s\n' "$(service_state openclaw-express-client.service)"
+  if curl -fsS "$CDP_URL/json/version" >/dev/null 2>&1; then printf 'cdp=ok\n'; else printf 'cdp=down\n'; fi
+  printf 'outbound_config=%s\n' "$(bridge_config_get channels.express.desktopOutboundEnabled | tr -d '\n')"
+  printf 'outbound_switch=%s\n' "$( [[ -f "$SWITCH_PATH" ]] && echo present || echo absent )"
+  printf 'dm_policy=%s\n' "$(bridge_config_get channels.express.dmPolicy | tr -d '\n')"
+}
+
+cmd_probe() {
+  local failed=0
+  [[ -x "$CLIENT_HOME/appdir/AppRun" ]] || { echo "FAIL client missing"; failed=1; }
+  for unit in openclaw-express-xvfb.service openclaw-express-keyring.service openclaw-express-client.service; do
+    if [[ "$(service_state "$unit")" == active ]]; then echo "OK $unit"; else echo "FAIL $unit"; failed=1; fi
+  done
+  if curl -fsS "$CDP_URL/json/version" >/dev/null; then echo "OK CDP $CDP_URL"; else echo "FAIL CDP $CDP_URL"; failed=1; fi
+  if openclaw config validate >/dev/null; then echo "OK OpenClaw config"; else echo "FAIL OpenClaw config"; failed=1; fi
+  if openclaw channels status --probe 2>/dev/null | grep -Eiq 'express.*(works|ok|running)'; then
+    echo "OK eXpress channel probe"
+  else
+    echo "WARN eXpress channel probe did not report ready"
+  fi
+  return "$failed"
+}
+
+set_outbound() {
+  local wanted=$1 restart=true
+  shift
+  while (($#)); do
+    case "$1" in --no-restart) restart=false ;; *) bridge_die "unknown option: $1" ;; esac
+    shift
+  done
+  bridge_require openclaw
+  if [[ "$wanted" == true ]]; then
+    local policy allow
+    policy=$(bridge_config_get channels.express.dmPolicy | tr -d '"[:space:]')
+    allow=$(bridge_config_get channels.express.allowFrom)
+    [[ "$policy" == allowlist ]] || bridge_die "dmPolicy must be allowlist before outbound can be enabled"
+    [[ "$allow" == *-* ]] || bridge_die "allowFrom is empty; run configure first"
+    openclaw config set channels.express.desktopOutboundEnabled true --strict-json >/dev/null
+    install -d -m 700 "$(dirname "$SWITCH_PATH")"
+    (umask 077; printf 'enabled-by=openclaw-express-bridge\n' > "$SWITCH_PATH")
+    bridge_note "Outbound gates enabled."
+  else
+    rm -f "$SWITCH_PATH"
+    openclaw config set channels.express.desktopOutboundEnabled false --strict-json >/dev/null || true
+    bridge_note "Outbound gates disabled."
+  fi
+  if [[ "$restart" == true ]]; then bridge_restart_gateway; else bridge_note "Gateway restart skipped."; fi
+}
+
+cmd_backup() {
+  bridge_require tar openclaw python3
+  install -d -m 700 "$BACKUP_HOME"
+  local output=${1:-"$BACKUP_HOME/openclaw-express-bridge-$(date -u +%Y%m%dT%H%M%SZ).tar.gz"}
+  local temp
+  temp=$(mktemp -d)
+  install -d -m 700 "$temp/payload"
+  for item in profile credentials state; do
+    [[ ! -e "$BRIDGE_HOME/$item" ]] || cp -a "$BRIDGE_HOME/$item" "$temp/payload/"
+  done
+  openclaw config get channels.express > "$temp/payload/channels.express.json"
+  printf '%s\n' "$VERSION" > "$temp/payload/bridge-version"
+  chmod -R go-rwx "$temp/payload"
+  tar -C "$temp" -czf "$output" payload
+  chmod 600 "$output"
+  rm -rf "$temp"
+  bridge_note "$output"
+}
+
+cmd_restore() {
+  local archive=${1:-}
+  [[ -n "$archive" && -f "$archive" ]] || bridge_die "restore needs an existing .tar.gz"
+  bridge_require tar openclaw python3
+  if tar -tzf "$archive" | grep -Eq '(^/|(^|/)\.\.(/|$))'; then bridge_die "unsafe archive paths"; fi
+  local temp
+  temp=$(mktemp -d)
+  tar -C "$temp" -xzf "$archive"
+  [[ -f "$temp/payload/channels.express.json" ]] || bridge_die "not a bridge backup"
+  cmd_backup >/dev/null
+  systemctl --user stop openclaw-express-client.service openclaw-express-keyring.service \
+    openclaw-express-xvfb.service 2>/dev/null || true
+  for item in profile credentials state; do
+    [[ ! -e "$temp/payload/$item" ]] || { rm -rf "$BRIDGE_HOME/$item"; cp -a "$temp/payload/$item" "$BRIDGE_HOME/"; }
+  done
+  rm -f "$SWITCH_PATH"
+  local json
+  json=$(<"$temp/payload/channels.express.json")
+  json=$(python3 -c 'import json,sys; x=json.load(sys.stdin); x["desktopOutboundEnabled"]=False; print(json.dumps(x))' <<<"$json")
+  openclaw config set channels.express "$json" --strict-json >/dev/null
+  rm -rf "$temp"
+  bridge_note "Backup restored. Outbound forced OFF; restart services and gateway when ready."
+}
+
+cmd_uninstall() {
+  local purge=false
+  [[ ${1:-} != --purge ]] || { purge=true; shift; }
+  [[ $# -eq 0 ]] || bridge_die "unknown uninstall option: $1"
+  rm -f "$SWITCH_PATH"
+  openclaw config set channels.express.desktopOutboundEnabled false --strict-json >/dev/null 2>&1 || true
+  systemctl --user disable --now openclaw-express-client.service openclaw-express-keyring.service \
+    openclaw-express-xvfb.service >/dev/null 2>&1 || true
+  rm -f "$UNIT_DIR"/openclaw-express-{client,keyring,xvfb}.service
+  systemctl --user daemon-reload 2>/dev/null || true
+  openclaw plugins disable openclaw-express >/dev/null 2>&1 || true
+  if [[ -d "$BRIDGE_HOME/install-backup/openclaw-express" ]]; then
+    rm -rf "$PLUGIN_DEST"
+    cp -a "$BRIDGE_HOME/install-backup/openclaw-express" "$PLUGIN_DEST"
+  else
+    rm -rf "$PLUGIN_DEST"
+  fi
+  rm -f "$HOME/.local/bin/openclaw-express-bridge"
+  if [[ "$purge" == true ]]; then
+    rm -rf "$BRIDGE_HOME" "$STATE_DIR"
+    bridge_note "Uninstalled and purged bridge data."
+  else
+    rm -rf "$RUNTIME_HOME"
+    bridge_note "Uninstalled. Profile and local backups preserved at $BRIDGE_HOME."
+  fi
+}
+
+command=${1:-help}
+[[ $# -eq 0 ]] || shift
+case "$command" in
+  help|-h|--help) usage ;;
+  version|--version) printf '%s\n' "$VERSION" ;;
+  install) cmd_install "$@" ;;
+  install-client) cmd_install_client "$@" ;;
+  configure) cmd_configure "$@" ;;
+  login) cmd_login "$@" ;;
+  status) cmd_status "$@" ;;
+  probe) cmd_probe "$@" ;;
+  enable-outbound) set_outbound true "$@" ;;
+  disable-outbound) set_outbound false "$@" ;;
+  backup) cmd_backup "$@" ;;
+  restore) cmd_restore "$@" ;;
+  uninstall) cmd_uninstall "$@" ;;
+  *) bridge_die "unknown command: $command (run --help)" ;;
+esac

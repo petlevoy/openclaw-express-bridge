@@ -1,0 +1,54 @@
+{
+  "name": "openclaw-express",
+  "version": "2.1.0",
+  "description": "eXpress channel for OpenClaw — BotX or official Linux desktop bridge",
+  "license": "MIT",
+  "type": "module",
+  "main": "./index.ts",
+  "scripts": {
+    "build": "tsc --noEmit && echo 'TypeScript check passed (jiti loads TS directly)'",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint src/",
+    "lint:fix": "eslint src/ --fix",
+    "format": "prettier --write \"src/**/*.ts\"",
+    "format:check": "prettier --check \"src/**/*.ts\"",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "openclaw": {
+    "extensions": [
+      "./index.ts"
+    ],
+    "channel": {
+      "id": "express",
+      "label": "eXpress",
+      "selectionLabel": "eXpress (BotX API)",
+      "docsPath": "/channels/express",
+      "docsLabel": "express",
+      "blurb": "eXpress messenger channel (BotX API, webhook)."
+    }
+  },
+  "devDependencies": {
+    "@types/node": "^25.5.0",
+    "@typescript-eslint/eslint-plugin": "^8.61.0",
+    "@typescript-eslint/parser": "^8.61.0",
+    "eslint": "^9.39.4",
+    "eslint-config-prettier": "^10.1.8",
+    "eslint-plugin-simple-import-sort": "^13.0.0",
+    "openclaw": "2026.6.10",
+    "prettier": "^3.8.4",
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.8"
+  },
+  "peerDependencies": {
+    "openclaw": "*"
+  },
+  "peerDependenciesMeta": {
+    "openclaw": {
+      "optional": false
+    }
+  },
+  "dependencies": {
+    "zod": "^4.4.3"
+  }
+}

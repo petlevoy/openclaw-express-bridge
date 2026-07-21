@@ -1,0 +1,5 @@
+#!/bin/sh
+set -e
+echo "Package files removed by dpkg. Per-user bridge data is intentionally preserved."
+echo "Run 'openclaw-express-bridge uninstall' before package removal for user cleanup."
+exit 0

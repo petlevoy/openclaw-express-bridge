@@ -1,0 +1,6 @@
+#!/bin/sh
+set -e
+echo "Installed openclaw-express-bridge. Run as the target user:"
+echo "  openclaw-express-bridge install"
+echo "  openclaw-express-bridge install-client"
+exit 0

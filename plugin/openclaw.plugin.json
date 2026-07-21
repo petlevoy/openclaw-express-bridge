@@ -1,0 +1,55 @@
+{
+  "id": "openclaw-express",
+  "name": "eXpress",
+  "description": "eXpress channel plugin (BotX or official Linux desktop bridge)",
+  "version": "2.1.0",
+  "channels": ["express"],
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {}
+  },
+  "channelConfigs": {
+    "express": {
+      "schema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "enabled": { "type": "boolean" },
+          "name": { "type": "string" },
+          "mode": { "type": "string", "enum": ["botx", "desktop"] },
+          "botId": { "type": "string" },
+          "secretKey": { "type": "string" },
+          "ctsUrl": { "type": "string" },
+          "webhookPort": { "type": "integer", "minimum": 1 },
+          "dmPolicy": {
+            "type": "string",
+            "enum": ["pairing", "allowlist", "open", "disabled"]
+          },
+          "allowFrom": { "type": "array", "items": { "type": "string" } },
+          "streamMode": {
+            "type": "string",
+            "enum": ["off", "partial", "block"]
+          },
+          "mediaMaxMb": { "type": "number", "exclusiveMinimum": 0 },
+          "textChunkLimit": { "type": "integer", "minimum": 1 },
+          "desktopCdpUrl": { "type": "string" },
+          "desktopChatId": { "type": "string", "format": "uuid" },
+          "desktopChatTitle": { "type": "string", "minLength": 1 },
+          "desktopSenderId": { "type": "string", "format": "uuid" },
+          "desktopSenderName": { "type": "string", "minLength": 1 },
+          "desktopPollIntervalMs": {
+            "type": "integer",
+            "minimum": 250,
+            "maximum": 60000
+          },
+          "desktopStatePath": { "type": "string", "minLength": 1 },
+          "desktopOutboundEnabled": { "type": "boolean" },
+          "desktopOutboundSwitchPath": { "type": "string", "minLength": 1 }
+        }
+      }
+    }
+  },
+  "uiHints": {}
+}

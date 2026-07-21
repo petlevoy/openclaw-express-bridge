@@ -1,0 +1,18 @@
+[Unit]
+Description=Isolated Secret Service for the official eXpress Linux client
+After=dbus.service
+Before=openclaw-express-client.service
+
+[Service]
+Type=notify
+NotifyAccess=all
+ExecStart=%h/.local/share/openclaw-express-bridge/runtime/lib/express-keyring-service.sh
+TimeoutStartSec=20s
+Restart=on-failure
+RestartSec=5s
+KillMode=control-group
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=default.target

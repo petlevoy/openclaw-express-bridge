@@ -1,0 +1,37 @@
+# Dependencies and generated output
+node_modules/
+dist/
+build/
+coverage/
+*.deb
+*.tar.gz
+*.tgz
+
+# Official proprietary eXpress client payload
+client/
+*.AppImage
+
+# Local runtime state and credentials
+.env
+.env.*
+!.env.example
+*.keyring
+*.pem
+*.key
+*.p12
+*.pfx
+profile/
+profiles/
+state/
+backups/
+screenshots/
+
+# Logs, caches and editor/OS files
+*.log
+*.pid
+*.sock
+.cache/
+.DS_Store
+.idea/
+.vscode/
+*~
