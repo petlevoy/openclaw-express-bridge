@@ -34,8 +34,6 @@ copy_runtime() {
   rsync -a "$ROOT/helpers/" "$dest/helpers/"
   rsync -a "$ROOT/systemd/" "$dest/systemd/"
   rsync -a --exclude node_modules --exclude .eslintcache "$ROOT/plugin/" "$dest/plugin/"
-  mkdir -p "$dest/plugin/node_modules"
-  cp -a "$ROOT/plugin/node_modules/zod" "$dest/plugin/node_modules/"
   install -m 644 "$ROOT/VERSION" "$ROOT/LICENSE" "$ROOT/client.env" "$dest/"
 }
 

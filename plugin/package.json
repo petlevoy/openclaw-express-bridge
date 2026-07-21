@@ -1,6 +1,6 @@
 {
   "name": "openclaw-express",
-  "version": "2.1.0",
+  "version": "2.1.1",
   "description": "eXpress channel for OpenClaw — BotX or official Linux desktop bridge",
   "license": "MIT",
   "type": "module",
@@ -35,20 +35,18 @@
     "eslint": "^9.39.4",
     "eslint-config-prettier": "^10.1.8",
     "eslint-plugin-simple-import-sort": "^13.0.0",
-    "openclaw": "2026.6.10",
+    "openclaw": "2026.7.1-2",
     "prettier": "^3.8.4",
     "typescript": "^5.9.3",
     "vitest": "^4.1.8"
   },
   "peerDependencies": {
-    "openclaw": "*"
+    "openclaw": ">=2026.7.1-2"
   },
   "peerDependenciesMeta": {
     "openclaw": {
       "optional": false
     }
   },
-  "dependencies": {
-    "zod": "^4.4.3"
-  }
+  "dependencies": {}
 }

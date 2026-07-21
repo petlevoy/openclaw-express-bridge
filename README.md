@@ -1,4 +1,4 @@
-# openclaw-express-bridge 1.0.0
+# openclaw-express-bridge 1.0.1
 
 An installable, fail-closed bridge between OpenClaw and the official eXpress
 Linux desktop client. It runs the client headlessly on an isolated Xvfb display,
@@ -13,7 +13,8 @@ This is an independent integration, not an official eXpress product.
 - Ubuntu/Debian, amd64
 - systemd user services and a user D-Bus session
 - OpenClaw already installed and available as `openclaw`
-- Node.js 22+ (required by current OpenClaw and the screenshot helper)
+- Node.js 22.22.3+, 24.15.0+, or 25.9.0+ within the OpenClaw-supported
+  major-version ranges
 
 The package installs a **headless/lightweight runtime**: no visible desktop is
 required after login. It still uses the unmodified official AppImage; it does
@@ -38,7 +39,7 @@ grant was found in the client payload.
 Debian package:
 
 ```bash
-sudo apt install ./openclaw-express-bridge_1.0.0_amd64.deb
+sudo apt install ./openclaw-express-bridge_1.0.1_amd64.deb
 openclaw-express-bridge install
 openclaw-express-bridge install-client
 ```
@@ -46,8 +47,8 @@ openclaw-express-bridge install-client
 Portable archive:
 
 ```bash
-tar -xzf openclaw-express-bridge-1.0.0-linux-amd64.tar.gz
-cd openclaw-express-bridge-1.0.0
+tar -xzf openclaw-express-bridge-1.0.1-linux-amd64.tar.gz
+cd openclaw-express-bridge-1.0.1
 ./install.sh
 ~/.local/bin/openclaw-express-bridge install-client
 ```
@@ -184,7 +185,7 @@ Please report suspected vulnerabilities privately as described in
   plugin update after a client upgrade.
 - The public build pins one verified client release; a newer release requires a
   reviewed URL and SHA-256 update in `client.env`.
-- Only Linux amd64 and one exact direct chat are covered by the 1.0.0 bootstrap.
+- Only Linux amd64 and one exact direct chat are covered by the 1.0.1 bootstrap.
 - Backups are access-controlled but not encrypted by this tool.
 
 ## License

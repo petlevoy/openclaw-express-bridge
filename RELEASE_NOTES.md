@@ -1,5 +1,28 @@
 # Release notes
 
+## 1.0.1
+
+Baseline compatibility update.
+
+### Changed
+
+- Updated the OpenClaw development baseline from `2026.6.10` to `2026.7.1-2`.
+- Declared OpenClaw `>=2026.7.1-2` as the minimum compatible host version.
+- Updated the eXpress channel plugin to 2.1.1.
+- Switched schema validation to OpenClaw's exported Zod runtime so the plugin
+  uses the same validator instance as the host.
+- Removed the redundant bundled Zod runtime from release artifacts.
+
+### Compatibility
+
+- TypeScript, lint, formatting, all plugin tests, packaging smoke tests and
+  secret scans pass against OpenClaw `2026.7.1-2`.
+- The shipped plugin has no standalone npm runtime dependencies. npm's audit
+  endpoint still reports advisories from OpenClaw's development-only nested
+  shrinkwrap; those packages are excluded from the release artifacts.
+- No change to the fail-closed outbound gates, exact allowlist or loopback-only
+  CDP binding.
+
 ## 1.0.0
 
 First packaged release of the headless eXpress desktop bridge for OpenClaw.
