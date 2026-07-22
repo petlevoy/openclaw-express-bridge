@@ -100,6 +100,8 @@ export function resolveExpressAccount(params: {
       webhookPort: section.webhookPort as number | undefined,
       name: section.name as string | undefined,
       dmPolicy: section.dmPolicy as ExpressAccountConfig["dmPolicy"],
+      markdown: section.markdown as ExpressAccountConfig["markdown"],
+      actions: section.actions as ExpressAccountConfig["actions"],
       allowFrom: section.allowFrom as string[] | undefined,
       streamMode: section.streamMode as ExpressAccountConfig["streamMode"],
       mediaMaxMb: section.mediaMaxMb as number | undefined,
@@ -116,6 +118,7 @@ export function resolveExpressAccount(params: {
         boolean | undefined,
       desktopOutboundSwitchPath: section.desktopOutboundSwitchPath as
         string | undefined,
+      desktopMediaRoots: section.desktopMediaRoots as string[] | undefined,
     };
   } else {
     // Named account
@@ -129,6 +132,8 @@ export function resolveExpressAccount(params: {
       webhookPort: raw.webhookPort as number | undefined,
       name: raw.name as string | undefined,
       dmPolicy: raw.dmPolicy as ExpressAccountConfig["dmPolicy"],
+      markdown: raw.markdown as ExpressAccountConfig["markdown"],
+      actions: raw.actions as ExpressAccountConfig["actions"],
       allowFrom: raw.allowFrom as string[] | undefined,
       streamMode: raw.streamMode as ExpressAccountConfig["streamMode"],
       mediaMaxMb: raw.mediaMaxMb as number | undefined,
@@ -143,6 +148,7 @@ export function resolveExpressAccount(params: {
       desktopOutboundEnabled: raw.desktopOutboundEnabled as boolean | undefined,
       desktopOutboundSwitchPath: raw.desktopOutboundSwitchPath as
         string | undefined,
+      desktopMediaRoots: raw.desktopMediaRoots as string[] | undefined,
     };
   }
 

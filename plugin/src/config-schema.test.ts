@@ -60,6 +60,20 @@ describe("Config Schema", () => {
       const result = ExpressAccountSchema.safeParse({ streamMode: "invalid" });
       expect(result.success).toBe(false);
     });
+
+    it("bounds desktop media and accepts explicit outbound roots", () => {
+      expect(
+        ExpressAccountSchema.safeParse({
+          mediaMaxMb: 20,
+          desktopMediaRoots: ["/srv/openclaw/outbound"],
+          markdown: { tables: "bullets" },
+          actions: { send: "allowlist" },
+        }).success,
+      ).toBe(true);
+      expect(ExpressAccountSchema.safeParse({ mediaMaxMb: 101 }).success).toBe(
+        false,
+      );
+    });
   });
 
   describe("ExpressConfigSchema", () => {

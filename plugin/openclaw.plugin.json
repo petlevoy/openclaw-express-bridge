@@ -2,7 +2,7 @@
   "id": "openclaw-express",
   "name": "eXpress",
   "description": "eXpress channel plugin (BotX or official Linux desktop bridge)",
-  "version": "2.1.1",
+  "version": "2.2.0",
   "channels": ["express"],
   "configSchema": {
     "type": "object",
@@ -22,7 +22,33 @@
           "botId": { "type": "string" },
           "secretKey": { "type": "string" },
           "ctsUrl": { "type": "string" },
-          "webhookPort": { "type": "integer", "minimum": 1 },
+          "markdown": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "tables": {
+                "type": "string",
+                "enum": ["off", "code", "block", "bullets"]
+              }
+            }
+          },
+          "actions": {
+            "type": "object",
+            "additionalProperties": {
+              "anyOf": [
+                { "type": "boolean" },
+                {
+                  "type": "string",
+                  "enum": ["pairing", "allowlist", "open"]
+                }
+              ]
+            }
+          },
+          "webhookPort": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "Deprecated compatibility field; BotX inbound is disabled"
+          },
           "dmPolicy": {
             "type": "string",
             "enum": ["pairing", "allowlist", "open", "disabled"]
@@ -32,7 +58,11 @@
             "type": "string",
             "enum": ["off", "partial", "block"]
           },
-          "mediaMaxMb": { "type": "number", "exclusiveMinimum": 0 },
+          "mediaMaxMb": {
+            "type": "number",
+            "exclusiveMinimum": 0,
+            "maximum": 100
+          },
           "textChunkLimit": { "type": "integer", "minimum": 1 },
           "desktopCdpUrl": { "type": "string" },
           "desktopChatId": { "type": "string", "format": "uuid" },
@@ -46,7 +76,89 @@
           },
           "desktopStatePath": { "type": "string", "minLength": 1 },
           "desktopOutboundEnabled": { "type": "boolean" },
-          "desktopOutboundSwitchPath": { "type": "string", "minLength": 1 }
+          "desktopOutboundSwitchPath": { "type": "string", "minLength": 1 },
+          "desktopMediaRoots": {
+            "type": "array",
+            "maxItems": 16,
+            "items": { "type": "string", "minLength": 1 }
+          },
+          "accounts": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "enabled": { "type": "boolean" },
+                "name": { "type": "string" },
+                "mode": { "type": "string", "enum": ["botx", "desktop"] },
+                "botId": { "type": "string" },
+                "secretKey": { "type": "string" },
+                "ctsUrl": { "type": "string" },
+                "markdown": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "tables": {
+                      "type": "string",
+                      "enum": ["off", "code", "block", "bullets"]
+                    }
+                  }
+                },
+                "actions": {
+                  "type": "object",
+                  "additionalProperties": {
+                    "anyOf": [
+                      { "type": "boolean" },
+                      {
+                        "type": "string",
+                        "enum": ["pairing", "allowlist", "open"]
+                      }
+                    ]
+                  }
+                },
+                "webhookPort": { "type": "integer", "minimum": 1 },
+                "dmPolicy": {
+                  "type": "string",
+                  "enum": ["pairing", "allowlist", "open", "disabled"]
+                },
+                "allowFrom": {
+                  "type": "array",
+                  "items": { "type": "string" }
+                },
+                "streamMode": {
+                  "type": "string",
+                  "enum": ["off", "partial", "block"]
+                },
+                "mediaMaxMb": {
+                  "type": "number",
+                  "exclusiveMinimum": 0,
+                  "maximum": 100
+                },
+                "textChunkLimit": { "type": "integer", "minimum": 1 },
+                "desktopCdpUrl": { "type": "string" },
+                "desktopChatId": { "type": "string", "format": "uuid" },
+                "desktopChatTitle": { "type": "string", "minLength": 1 },
+                "desktopSenderId": { "type": "string", "format": "uuid" },
+                "desktopSenderName": { "type": "string", "minLength": 1 },
+                "desktopPollIntervalMs": {
+                  "type": "integer",
+                  "minimum": 250,
+                  "maximum": 60000
+                },
+                "desktopStatePath": { "type": "string", "minLength": 1 },
+                "desktopOutboundEnabled": { "type": "boolean" },
+                "desktopOutboundSwitchPath": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "desktopMediaRoots": {
+                  "type": "array",
+                  "maxItems": 16,
+                  "items": { "type": "string", "minLength": 1 }
+                }
+              }
+            }
+          }
         }
       }
     }

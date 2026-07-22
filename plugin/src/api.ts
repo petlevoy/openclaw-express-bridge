@@ -35,6 +35,34 @@ async function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function parseCtsBaseUrl(value: string): URL {
+  const url = new URL(value);
+  const loopback = ["localhost", "127.0.0.1", "[::1]", "::1"].includes(
+    url.hostname.toLowerCase(),
+  );
+  if (
+    (url.protocol !== "https:" && !(url.protocol === "http:" && loopback)) ||
+    url.username ||
+    url.password ||
+    url.search ||
+    url.hash
+  ) {
+    throw new Error(
+      "BotX CTS URL must be credential-free HTTPS (or loopback HTTP)",
+    );
+  }
+  url.pathname = url.pathname.replace(/\/+$/, "");
+  return url;
+}
+
+function buildCtsUrl(ctsUrl: string, path: string): string {
+  const base = parseCtsBaseUrl(ctsUrl);
+  return new URL(
+    path.replace(/^\/+/, ""),
+    `${base.toString().replace(/\/$/, "")}/`,
+  ).toString();
+}
+
 async function fetchWithRetry(
   url: string,
   options: RequestInit,
@@ -54,11 +82,13 @@ async function fetchWithRetry(
         response.headers.get("retry-after") ?? "5",
         10,
       );
+      await response.body?.cancel().catch(() => undefined);
       await sleep(Math.min(retryAfter * 1000, 15_000));
       return fetchWithRetry(url, options, attempt + 1);
     }
 
     if (response.status >= 500 && attempt < 3) {
+      await response.body?.cancel().catch(() => undefined);
       await sleep(Math.pow(2, attempt) * 1000);
       return fetchWithRetry(url, options, attempt + 1);
     }
@@ -84,17 +114,21 @@ export async function getToken(
   botId: string,
   secretKey: string,
 ): Promise<string> {
-  const url = `${ctsUrl}/api/v3/botx/bots/${botId}/token`;
+  const url = buildCtsUrl(
+    ctsUrl,
+    `api/v3/botx/bots/${encodeURIComponent(botId)}/token`,
+  );
   const response = await fetchWithRetry(url, {
     method: "POST",
+    redirect: "error",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ secret_key: secretKey }),
   });
 
   if (!response.ok) {
-    const text = await response.text().catch(() => "");
+    await response.body?.cancel().catch(() => undefined);
     throw new BotXApiError(
-      `BotX getToken failed [${response.status}]: ${text}`,
+      `BotX getToken failed [${response.status}]`,
       response.status,
     );
   }
@@ -146,7 +180,7 @@ export async function sendMessage(
   groupChatId: string,
   text: string,
 ): Promise<string> {
-  const url = `${ctsUrl}/api/v3/botx/notifications/direct`;
+  const url = buildCtsUrl(ctsUrl, "api/v3/botx/notifications/direct");
   const body = {
     group_chat_id: groupChatId,
     notification: {
@@ -156,6 +190,7 @@ export async function sendMessage(
 
   const response = await fetchWithRetry(url, {
     method: "POST",
+    redirect: "error",
     headers: {
       Authorization: `Bearer ${token}`,
       "Content-Type": "application/json",
@@ -164,13 +199,14 @@ export async function sendMessage(
   });
 
   if (response.status === 401) {
+    await response.body?.cancel().catch(() => undefined);
     throw new UnauthorizedError("BotX 401 Unauthorized");
   }
 
   if (!response.ok) {
-    const text2 = await response.text().catch(() => "");
+    await response.body?.cancel().catch(() => undefined);
     throw new BotXApiError(
-      `BotX sendMessage failed [${response.status}]: ${text2}`,
+      `BotX sendMessage failed [${response.status}]`,
       response.status,
     );
   }
@@ -210,6 +246,8 @@ export async function sendMessageWithRefresh(
 
 // ─── File operations ──────────────────────────────────────────
 
+export const BOTX_MAX_DOWNLOAD_CHUNKS = 4096;
+
 /**
  * Download a file from BotX by file metadata.
  */
@@ -217,25 +255,73 @@ export async function downloadFile(
   ctsUrl: string,
   token: string,
   fileUrl: string,
+  maxBytes = 20 * 1024 * 1024,
+  maxChunks = BOTX_MAX_DOWNLOAD_CHUNKS,
 ): Promise<Buffer> {
-  const url = fileUrl.startsWith("http") ? fileUrl : `${ctsUrl}${fileUrl}`;
-  const response = await fetchWithRetry(url, {
+  if (!Number.isSafeInteger(maxBytes) || maxBytes < 1) {
+    throw new Error("BotX download size limit is invalid");
+  }
+  if (!Number.isSafeInteger(maxChunks) || maxChunks < 1) {
+    throw new Error("BotX download chunk limit is invalid");
+  }
+  const ctsOrigin = parseCtsBaseUrl(ctsUrl);
+  const url = new URL(fileUrl, `${ctsOrigin.toString().replace(/\/$/, "")}/`);
+  if (
+    !["http:", "https:"].includes(url.protocol) ||
+    url.origin !== ctsOrigin.origin ||
+    url.username ||
+    url.password
+  ) {
+    throw new BotXApiError(
+      "BotX file URL is outside the configured CTS origin",
+      400,
+    );
+  }
+  url.hash = "";
+  const response = await fetchWithRetry(url.toString(), {
     method: "GET",
+    redirect: "error",
     headers: {
       Authorization: `Bearer ${token}`,
     },
   });
 
   if (!response.ok) {
-    const text = await response.text().catch(() => "");
+    await response.body?.cancel().catch(() => undefined);
     throw new BotXApiError(
-      `BotX downloadFile failed [${response.status}]: ${text}`,
+      `BotX downloadFile failed [${response.status}]`,
       response.status,
     );
   }
 
-  const arrayBuffer = await response.arrayBuffer();
-  return Buffer.from(arrayBuffer);
+  const contentLength = Number(response.headers.get("content-length") ?? 0);
+  if (Number.isFinite(contentLength) && contentLength > maxBytes) {
+    await response.body?.cancel().catch(() => undefined);
+    throw new Error("BotX file exceeds the configured media limit");
+  }
+  if (!response.body) return Buffer.alloc(0);
+  const reader = response.body.getReader();
+  const chunks: Buffer[] = [];
+  let total = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > maxBytes) {
+        await reader.cancel();
+        throw new Error("BotX file exceeds the configured media limit");
+      }
+      if (chunks.length >= maxChunks) {
+        await reader.cancel();
+        throw new Error("BotX file exceeds the configured chunk limit");
+      }
+      chunks.push(Buffer.from(value));
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  return Buffer.concat(chunks, total);
 }
 
 // ─── Re-exports ───────────────────────────────────────────────

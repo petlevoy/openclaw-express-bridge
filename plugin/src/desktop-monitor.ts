@@ -6,16 +6,19 @@ import { join } from "node:path";
 import { createReplyPrefixOptions } from "openclaw/plugin-sdk/channel-runtime";
 
 import {
+  DEFAULT_DESKTOP_MEDIA_MAX_MB,
   desktopClientFromAccount,
   DesktopDedupeStore,
   type DesktopMessage,
   isDesktopOutboundUnlocked,
+  validateDesktopOutboundFile,
 } from "./desktop-cdp.js";
 import {
   DesktopDispatchRateLimiter,
   redactDesktopError,
   selectDesktopInboundBatch,
 } from "./desktop-safety.js";
+import { toPlainText } from "./format.js";
 import type { ExpressMonitorOptions } from "./monitor.js";
 import { getExpressRuntime } from "./runtime.js";
 
@@ -108,6 +111,14 @@ export async function startExpressDesktopMonitor(
           const queued = selectDesktopInboundBatch(
             snapshot.messages,
             (messageId) => store.has(messageId),
+            {
+              expectedSenderId: senderId,
+              maxMediaBytes: Math.floor(
+                (account.config.mediaMaxMb ?? DEFAULT_DESKTOP_MEDIA_MAX_MB) *
+                  1024 *
+                  1024,
+              ),
+            },
           );
           for (const message of queued) {
             if (abortSignal.aborted) break;
@@ -147,14 +158,34 @@ async function dispatchDesktopInbound(
     account.config.desktopSenderName ?? account.config.desktopChatTitle;
   const chatId = account.config.desktopChatId!;
   const text = message.text.trim();
-  if (!text) return;
+  const maxMediaBytes = Math.floor(
+    (account.config.mediaMaxMb ?? DEFAULT_DESKTOP_MEDIA_MAX_MB) * 1024 * 1024,
+  );
+
+  const core = getExpressRuntime();
+  const mediaPaths: string[] = [];
+  const mediaTypes: string[] = [];
+  let attachmentText = "";
+  if (message.attachment) {
+    const downloaded = await client.downloadAttachment(message, maxMediaBytes);
+    const saved = await core.channel.media.saveMediaBuffer(
+      downloaded.buffer,
+      downloaded.mimeType,
+      "inbound",
+      maxMediaBytes,
+      downloaded.fileName,
+    );
+    mediaPaths.push(saved.path);
+    mediaTypes.push(downloaded.mimeType);
+    attachmentText = `[File: ${downloaded.fileName}]`;
+  }
+  if (!text && mediaPaths.length === 0) return;
 
   statusSink?.({ lastInboundAt: Date.now() });
   log?.info?.(
     `[${account.accountId}] eXpress desktop inbound id=${message.id}`,
   );
 
-  const core = getExpressRuntime();
   const route = core.channel.routing.resolveAgentRoute({
     cfg: config,
     channel: "express",
@@ -176,19 +207,20 @@ async function dispatchDesktopInbound(
     storePath,
     sessionKey: route.sessionKey,
   });
+  const bodyForAgent = [text, attachmentText].filter(Boolean).join("\n");
   const body = core.channel.reply.formatAgentEnvelope({
     channel: "eXpress",
     from: fromLabel,
     timestamp: Date.now(),
     previousTimestamp,
     envelope: envelopeOptions,
-    body: text,
+    body: bodyForAgent,
   });
   const ctxPayload = core.channel.reply.finalizeInboundContext({
     Body: body,
-    BodyForAgent: text,
+    BodyForAgent: bodyForAgent,
     RawBody: text,
-    CommandBody: text,
+    CommandBody: text || attachmentText,
     From: `express:${senderId}`,
     To: `express:${account.accountId}`,
     SessionKey: route.sessionKey,
@@ -203,6 +235,10 @@ async function dispatchDesktopInbound(
     MessageSidFull: message.id,
     OriginatingChannel: "express",
     OriginatingTo: `express:${chatId}`,
+    MediaPath: mediaPaths[0],
+    MediaPaths: mediaPaths.length ? mediaPaths : undefined,
+    MediaType: mediaTypes[0],
+    MediaTypes: mediaTypes.length ? mediaTypes : undefined,
   });
 
   void core.channel.session
@@ -240,23 +276,43 @@ async function dispatchDesktopInbound(
           );
           return;
         }
-        const parts: string[] = [];
-        if (payload.text?.trim()) parts.push(payload.text.trim());
+        if (payload.text?.trim()) {
+          const safeText = toPlainText(payload.text).trim();
+          const chunks = core.channel.text.chunkText(
+            safeText,
+            account.config.textChunkLimit ?? 4000,
+          );
+          for (const chunk of chunks) {
+            if (!(await isDesktopOutboundUnlocked(account))) {
+              throw new Error(
+                "desktop eXpress outbound was locked during reply",
+              );
+            }
+            await client.sendText(chatId, chunk);
+            statusSink?.({ lastOutboundAt: Date.now() });
+          }
+        }
         const media = payload.mediaUrls?.length
           ? payload.mediaUrls
           : payload.mediaUrl
             ? [payload.mediaUrl]
             : [];
-        for (const mediaUrl of media) parts.push(`[Media: ${mediaUrl}]`);
-        for (const part of parts) {
-          const chunks = core.channel.text.chunkMarkdownText(
-            part,
-            account.config.textChunkLimit ?? 4000,
-          );
-          for (const chunk of chunks) {
-            await client.sendText(chatId, chunk);
-            statusSink?.({ lastOutboundAt: Date.now() });
+        for (const mediaUrl of media) {
+          if (!(await isDesktopOutboundUnlocked(account))) {
+            throw new Error("desktop eXpress outbound was locked during reply");
           }
+          const file = await validateDesktopOutboundFile(
+            mediaUrl,
+            account.config.mediaMaxMb ?? DEFAULT_DESKTOP_MEDIA_MAX_MB,
+            account.config.desktopMediaRoots,
+          );
+          if (!(await isDesktopOutboundUnlocked(account))) {
+            throw new Error(
+              "desktop eXpress outbound was locked during file validation",
+            );
+          }
+          await client.sendFile(chatId, file);
+          statusSink?.({ lastOutboundAt: Date.now() });
         }
       },
       onError: (error, info) => {

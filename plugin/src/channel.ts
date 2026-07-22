@@ -1,8 +1,8 @@
 /**
  * eXpress channel plugin for OpenClaw.
  *
- * Implements the ChannelPlugin interface to integrate eXpress messenger
- * via the BotX API (webhook-based).
+ * Implements the ChannelPlugin interface for the desktop bridge and BotX
+ * outbound text delivery. BotX inbound remains fail-closed.
  */
 
 import type {
@@ -29,19 +29,23 @@ import {
 } from "./accounts.js";
 import { expressMessageActions } from "./actions.js";
 import { ExpressConfigSchema } from "./config-schema.js";
-import { startExpressMonitor } from "./monitor.js";
+import { toPlainText } from "./format.js";
+import {
+  BOTX_INBOUND_DISABLED_MESSAGE,
+  startExpressMonitor,
+} from "./monitor.js";
 import { expressSetupWizard } from "./onboarding.js";
 import { getExpressRuntime } from "./runtime.js";
-import { sendExpressMessage } from "./send.js";
+import { sendExpressMediaMessage, sendExpressMessage } from "./send.js";
 
 // ── Meta ──
 
 const expressMeta: ChannelMeta = {
   id: "express",
   label: "eXpress",
-  selectionLabel: "eXpress (BotX or official Linux client)",
+  selectionLabel: "eXpress (desktop or BotX outbound)",
   docsPath: "/channels/express",
-  blurb: "eXpress via BotX or an allowlisted official Linux client session.",
+  blurb: "eXpress via an allowlisted Linux client or BotX outbound text.",
   order: 91,
   aliases: ["botx", "eXpress"],
 };
@@ -58,7 +62,7 @@ export const expressPlugin: ChannelPlugin<ResolvedExpressAccount> = {
     chatTypes: ["direct"],
     reactions: false,
     threads: false,
-    media: false,
+    media: true,
     nativeCommands: false,
     blockStreaming: false,
     edit: false,
@@ -205,8 +209,8 @@ export const expressPlugin: ChannelPlugin<ResolvedExpressAccount> = {
   outbound: {
     deliveryMode: "direct" as const,
     chunker: (text: string, limit: number) =>
-      getExpressRuntime().channel.text.chunkMarkdownText(text, limit),
-    chunkerMode: "markdown" as const,
+      getExpressRuntime().channel.text.chunkText(toPlainText(text), limit),
+    chunkerMode: "text" as const,
     textChunkLimit: 4000,
 
     sendText: async ({ cfg, to, text, accountId }) => {
@@ -241,15 +245,16 @@ export const expressPlugin: ChannelPlugin<ResolvedExpressAccount> = {
       return { channel: "express" as const, messageId: result.messageId };
     },
 
-    sendMedia: async ({ to, text, accountId }) => {
-      const cfg = await getExpressRuntime().config.loadConfig();
+    sendMedia: async ({ cfg, to, text, mediaUrl, accountId }) => {
       const account = resolveExpressAccount({ cfg, accountId });
       if (!account.configured) {
         throw new Error(`eXpress account ${account.accountId} not configured`);
       }
+      if (!mediaUrl) {
+        throw new Error("eXpress media path is required");
+      }
 
-      // BotX notifications don't support binary media — send as text
-      const result = await sendExpressMessage(to, text ?? "[Media]", {
+      const result = await sendExpressMediaMessage(to, text ?? "", mediaUrl, {
         cfg,
         accountId: account.accountId,
       });
@@ -370,9 +375,8 @@ export const expressPlugin: ChannelPlugin<ResolvedExpressAccount> = {
         const { probeExpressDesktop } = await import("./desktop-cdp.js");
         return probeExpressDesktop(account, timeoutMs);
       }
-      // BotX doesn't have a lightweight probe endpoint — just check config
       void timeoutMs;
-      return { ok: true };
+      return { ok: false, error: BOTX_INBOUND_DISABLED_MESSAGE };
     },
 
     buildAccountSnapshot: ({ account, runtime, probe }) => ({

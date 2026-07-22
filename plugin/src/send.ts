@@ -6,7 +6,13 @@ import type { OpenClawConfig } from "openclaw/plugin-sdk/core";
 
 import { resolveExpressAccount } from "./accounts.js";
 import { sendMessageWithRefresh } from "./api.js";
-import { sendExpressDesktopMessage } from "./desktop-cdp.js";
+import {
+  DEFAULT_DESKTOP_MEDIA_MAX_MB,
+  sendExpressDesktopFile,
+  sendExpressDesktopMessage,
+  validateDesktopOutboundFile,
+} from "./desktop-cdp.js";
+import { toPlainText } from "./format.js";
 
 export interface ExpressSendOptions {
   accountId?: string;
@@ -70,7 +76,7 @@ export async function sendExpressMessage(
     }
     if (account.mode === "desktop") {
       const chatId = normalizeTargetId(to);
-      const safeText = (text ?? "").trim();
+      const safeText = toPlainText(text ?? "").trim();
       if (!safeText) return { messageId: "" };
       const messageId = await sendExpressDesktopMessage(
         account,
@@ -83,7 +89,7 @@ export async function sendExpressMessage(
   const creds = resolveCredentials(opts);
   const chatId = normalizeTargetId(to);
 
-  const safeText = (text ?? "").trim();
+  const safeText = toPlainText(text ?? "").trim();
   if (!safeText) {
     return { messageId: "" };
   }
@@ -101,20 +107,43 @@ export async function sendExpressMessage(
 }
 
 /**
- * Send a media message to eXpress (downloads and sends as text with URL description).
- * BotX API doesn't support direct media upload for notifications,
- * so we describe the media inline.
+ * Send a media message to eXpress. Desktop mode attaches an existing local
+ * regular file through the official client's matching file input.
  */
 export async function sendExpressMediaMessage(
   to: string,
   caption: string,
-  _mediaPath: string,
+  mediaPath: string,
   opts: ExpressSendOptions = {},
 ): Promise<{ messageId: string }> {
-  // BotX notifications don't support binary attachments directly.
-  // Send caption text; media would need to be uploaded separately.
-  const text = caption || "[Media]";
-  return sendExpressMessage(to, text, opts);
+  if (opts.cfg) {
+    const account = resolveExpressAccount({
+      cfg: opts.cfg,
+      accountId: opts.accountId,
+    });
+    if (!account.configured) {
+      throw new Error(`eXpress account ${account.accountId} not configured`);
+    }
+    if (account.mode === "desktop") {
+      const chatId = normalizeTargetId(to);
+      await validateDesktopOutboundFile(
+        mediaPath,
+        account.config.mediaMaxMb ?? DEFAULT_DESKTOP_MEDIA_MAX_MB,
+        account.config.desktopMediaRoots,
+      );
+      const safeCaption = toPlainText(caption).trim();
+      if (safeCaption) {
+        await sendExpressDesktopMessage(account, chatId, safeCaption);
+      }
+      const messageId = await sendExpressDesktopFile(
+        account,
+        chatId,
+        mediaPath,
+      );
+      return { messageId };
+    }
+  }
+  throw new Error("eXpress BotX outbound file upload is not supported");
 }
 
 /**

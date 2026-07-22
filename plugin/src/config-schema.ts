@@ -46,7 +46,7 @@ export const ExpressAccountSchemaBase = z
     dmPolicy: DmPolicySchema.optional().default("pairing"),
     allowFrom: z.array(z.string()).optional(),
     streamMode: z.enum(["off", "partial", "block"]).optional(),
-    mediaMaxMb: z.number().positive().optional(),
+    mediaMaxMb: z.number().positive().max(100).optional(),
     textChunkLimit: z.number().int().positive().optional(),
     desktopCdpUrl: z.string().url().optional(),
     desktopChatId: z.string().uuid().optional(),
@@ -57,6 +57,7 @@ export const ExpressAccountSchemaBase = z
     desktopStatePath: z.string().min(1).optional(),
     desktopOutboundEnabled: z.boolean().optional(),
     desktopOutboundSwitchPath: z.string().min(1).optional(),
+    desktopMediaRoots: z.array(z.string().min(1)).max(16).optional(),
     actions: z
       .record(
         z.string(),

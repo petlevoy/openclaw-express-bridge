@@ -1,10 +1,10 @@
-# openclaw-express-bridge 1.0.1
+# openclaw-express-bridge 1.1.0
 
 An installable, fail-closed bridge between OpenClaw and the official eXpress
 Linux desktop client. It runs the client headlessly on an isolated Xvfb display,
 uses a dedicated profile/keyring, and exposes Chrome DevTools Protocol only on
-`127.0.0.1:18997`. The bundled OpenClaw channel plugin reads and sends messages
-through that local desktop session.
+`127.0.0.1:18997`. The bundled OpenClaw channel plugin reads and sends text and
+bounded file attachments through that local desktop session.
 
 This is an independent integration, not an official eXpress product.
 
@@ -39,7 +39,7 @@ grant was found in the client payload.
 Debian package:
 
 ```bash
-sudo apt install ./openclaw-express-bridge_1.0.1_amd64.deb
+sudo apt install ./openclaw-express-bridge_1.1.0_amd64.deb
 openclaw-express-bridge install
 openclaw-express-bridge install-client
 ```
@@ -47,8 +47,8 @@ openclaw-express-bridge install-client
 Portable archive:
 
 ```bash
-tar -xzf openclaw-express-bridge-1.0.1-linux-amd64.tar.gz
-cd openclaw-express-bridge-1.0.1
+tar -xzf openclaw-express-bridge-1.1.0-linux-amd64.tar.gz
+cd openclaw-express-bridge-1.1.0
 ./install.sh
 ~/.local/bin/openclaw-express-bridge install-client
 ```
@@ -120,6 +120,68 @@ Use `--no-restart` with either outbound command if the gateway must be restarted
 separately. CDP binds only to loopback. Profile, keyring password, state,
 screenshots and backups are mode 0700/0600 and are never part of build artifacts.
 
+The switch must be an owner-controlled, mode-0600 regular file; symlinks,
+directories and loose permissions keep outbound locked.
+
+## File attachments
+
+Desktop inbound supports document, image, audio/voice and video entries when the
+official client exposes complete, valid file metadata. For client 3.68.44 the
+bridge invokes `MessageEntryDocument.onClick({downloadToBlob: true})` for
+documents and the enclosing `MessageEntry.loadAttachment` handler for the other
+supported media types. It reads attachment metadata from
+`message.payload.payload`, waits for the downloaded blob at
+`message.payload.fileBlob`, and copies only a `Blob` or `blob:file:` URL into
+OpenClaw in bounded 512 KiB chunks. File UUID, sender UUID, name, size and MIME
+type are checked before and after the download. The saved path and media type
+are passed through OpenClaw's standard inbound media context.
+
+Desktop outbound `sendMedia` accepts only a local regular, non-symlink file. The
+default allowed root is `~/.openclaw/media`; additional exact roots require the
+explicit `desktopMediaRoots` setting. Credential-like paths are rejected. The
+default limit is 20 MB and the hard configuration ceiling is 100 MB. Known image
+and video extensions use the client's exact image/video inputs; documents,
+audio and unknown extensions use the document input.
+
+BotX outbound file upload is not implemented and fails with an error; the bridge
+never substitutes a text link and claims that a file was uploaded.
+
+## BotX security status
+
+BotX text delivery to CTS remains available. BotX inbound is disabled: the old
+unsigned per-account HTTP listener is no longer reachable from the channel
+lifecycle. It will stay disabled until a verified BotX JWT v2 contract/SDK and
+OpenClaw's shared HTTP-listener routing are implemented. Sender allowlists and
+`bot_id` comparisons are authorization policy, not request authentication.
+The legacy `webhookPort` field is accepted for config compatibility but ignored.
+The retained BotX text path uses the legacy CTS bearer-token exchange; it does
+not claim BotX JWT v2 inbound verification or CTS v2 request signing.
+
+CTS credential-bearing requests reject redirects. File downloads accept only
+HTTP(S) URLs on the configured CTS origin, reject embedded credentials and
+redirects, and enforce the media limit both from `Content-Length` and while
+streaming. Non-loopback CTS endpoints must use HTTPS.
+
+## PDF scope matrix
+
+| Requirement | 1.1.0 state |
+|---|---|
+| Native OpenClaw channel lifecycle | Implemented |
+| Default/named account configuration | Implemented; concurrent desktop accounts require separate client/CDP sessions |
+| Concurrent BotX accounts on one listener | Blocked with BotX inbound |
+| BotX JWT v2 inbound authentication | Not implemented; fail-closed |
+| Shared HTTP listener and account routing | Not implemented |
+| Standard inbound routing/session context | Desktop implemented |
+| Access policies | Desktop exact allowlist only |
+| Standard outbound text delivery | Desktop and BotX implemented |
+| Files | Desktop receive/send implemented |
+| Images/video | Receive; native outbound input by extension |
+| Voice/audio | Receive as audio media; outbound uses the document input |
+| Reactions | Not implemented |
+| Chat/thread creation | Not implemented |
+| Typing indicator | Not implemented |
+| Markdown conversion | Outbound Markdown-to-plain-text only |
+
 ## Command reference
 
 - `install [--dry-run] [--client FILE]` — per-user runtime/plugin/unit setup.
@@ -185,7 +247,11 @@ Please report suspected vulnerabilities privately as described in
   plugin update after a client upgrade.
 - The public build pins one verified client release; a newer release requires a
   reviewed URL and SHA-256 update in `client.env`.
-- Only Linux amd64 and one exact direct chat are covered by the 1.0.1 bootstrap.
+- Only Linux amd64 and one exact direct chat are covered by the 1.1.0 bootstrap.
+- No live eXpress file was sent by the automated test suite; the desktop file
+  contract is covered by unit tests and must be canary-tested in an approved chat.
+- BotX inbound, shared-listener routing, reactions, chat/thread creation and
+  typing indicators are not implemented.
 - Backups are access-controlled but not encrypted by this tool.
 
 ## License

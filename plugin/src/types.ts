@@ -115,10 +115,17 @@ export interface ExpressAccountConfig {
   secretKey?: string;
   /** CTS server URL, e.g. https://cts.example.com */
   ctsUrl?: string;
-  /** Port for incoming webhooks (default: 18790) */
+  /** Deprecated compatibility field; BotX inbound does not open a listener. */
   webhookPort?: number;
   /** DM policy */
-  dmPolicy?: "pairing" | "allowlist" | "open";
+  dmPolicy?: "pairing" | "allowlist" | "open" | "disabled";
+  /** OpenClaw Markdown rendering preferences accepted by the host schema. */
+  markdown?: { tables?: "off" | "code" | "block" | "bullets" };
+  /** Per-action access policy accepted by the host channel schema. */
+  actions?: Record<
+    string,
+    boolean | "pairing" | "allowlist" | "open" | undefined
+  >;
   /** Allowed sender HUIDs */
   allowFrom?: string[];
   /** Account display name */
@@ -147,6 +154,8 @@ export interface ExpressAccountConfig {
   desktopOutboundEnabled?: boolean;
   /** A second, file-based outbound interlock checked for every send. */
   desktopOutboundSwitchPath?: string;
+  /** Additional roots from which desktop outbound files may be attached. */
+  desktopMediaRoots?: string[];
 }
 
 export interface ExpressChannelConfig {
@@ -159,7 +168,12 @@ export interface ExpressChannelConfig {
   secretKey?: string;
   ctsUrl?: string;
   webhookPort?: number;
-  dmPolicy?: "pairing" | "allowlist" | "open";
+  dmPolicy?: "pairing" | "allowlist" | "open" | "disabled";
+  markdown?: { tables?: "off" | "code" | "block" | "bullets" };
+  actions?: Record<
+    string,
+    boolean | "pairing" | "allowlist" | "open" | undefined
+  >;
   allowFrom?: string[];
   desktopCdpUrl?: string;
   desktopChatId?: string;
@@ -170,6 +184,7 @@ export interface ExpressChannelConfig {
   desktopStatePath?: string;
   desktopOutboundEnabled?: boolean;
   desktopOutboundSwitchPath?: string;
+  desktopMediaRoots?: string[];
 }
 
 // NOTE: ResolvedExpressAccount определён в accounts.ts (каноничный источник)

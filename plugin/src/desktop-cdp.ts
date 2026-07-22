@@ -7,15 +7,26 @@
  */
 
 import {
-  access,
   chmod,
+  lstat,
   mkdir,
   readFile,
+  realpath,
   rename,
   writeFile,
 } from "node:fs/promises";
 import { homedir } from "node:os";
-import { dirname, resolve } from "node:path";
+import {
+  dirname,
+  extname,
+  isAbsolute,
+  join,
+  parse,
+  relative,
+  resolve,
+  sep,
+} from "node:path";
+import { fileURLToPath } from "node:url";
 
 import type { ResolvedExpressAccount } from "./accounts.js";
 
@@ -32,6 +43,10 @@ interface CdpReply {
   error?: { code?: number; message?: string };
 }
 
+interface CdpDomNode {
+  nodeId?: number;
+}
+
 interface PendingRequest {
   resolve: (value: CdpReply) => void;
   reject: (error: Error) => void;
@@ -40,7 +55,22 @@ interface PendingRequest {
 
 export interface DesktopMessage {
   id: string;
+  senderId: string;
+  type: "text" | "document" | "image" | "audio" | "voice" | "video";
   text: string;
+  attachment?: DesktopAttachment;
+}
+
+export interface DesktopAttachment {
+  fileId: string;
+  fileName: string;
+  fileSize: number;
+  mimeType: string;
+  kind: "file" | "image" | "audio" | "video";
+}
+
+export interface DesktopDownloadedAttachment extends DesktopAttachment {
+  buffer: Buffer;
 }
 
 export interface DesktopSnapshot {
@@ -59,8 +89,37 @@ export interface DesktopClientConfig {
   timeoutMs?: number;
 }
 
+export interface DesktopOutboundFile {
+  path: string;
+  size: number;
+  kind: DesktopOutboundKind;
+  device: number;
+  inode: number;
+  mtimeMs: number;
+}
+
+export type DesktopOutboundKind = "document" | "image" | "video";
+
+interface DesktopAttachmentStatus {
+  ready: boolean;
+  size: number | null;
+  mimeType: string | null;
+}
+
+export const DEFAULT_DESKTOP_MEDIA_MAX_MB = 20;
+export const MAX_DESKTOP_MEDIA_MAX_MB = 100;
+export const DESKTOP_ATTACHMENT_CHUNK_BYTES = 512 * 1024;
+export const MAX_DESKTOP_ATTACHMENT_CHUNKS =
+  (MAX_DESKTOP_MEDIA_MAX_MB * 1024 * 1024) / DESKTOP_ATTACHMENT_CHUNK_BYTES;
+export const DESKTOP_DOCUMENT_INPUT_SELECTOR =
+  'input[id^="document-input"][type="file"][accept="*"]';
+export const DESKTOP_IMAGE_INPUT_SELECTOR =
+  'input[id^="image-input"][type="file"][accept="image/gif,image/jpeg,image/png,image/vnd.microsoft.icon,image/webp,image/bmp"]';
+export const DESKTOP_VIDEO_INPUT_SELECTOR =
+  'input[id^="video-input"][type="file"][accept="video/*"]';
+
 interface DedupeState {
-  version: 1;
+  version: 2;
   seen: string[];
   updatedAt: string;
 }
@@ -69,6 +128,177 @@ function resolveUserPath(value: string): string {
   if (value === "~") return homedir();
   if (value.startsWith("~/")) return resolve(homedir(), value.slice(2));
   return resolve(value);
+}
+
+function defaultDesktopMediaRoots(): string[] {
+  const openClawHome = resolveUserPath(
+    process.env.OPENCLAW_HOME?.trim() || "~/.openclaw",
+  );
+  return [resolve(openClawHome, "media")];
+}
+
+function resolveLocalMediaPath(value: string): string {
+  const trimmed = value.trim();
+  if (!trimmed) throw new Error("desktop eXpress media path is required");
+  if (trimmed.startsWith("file://")) {
+    try {
+      return resolve(fileURLToPath(new URL(trimmed)));
+    } catch {
+      throw new Error("desktop eXpress media file URL is invalid");
+    }
+  }
+  if (/^[a-z][a-z0-9+.-]*:/i.test(trimmed)) {
+    throw new Error("desktop eXpress media must be a local file");
+  }
+  return resolveUserPath(trimmed);
+}
+
+function isWithinRoot(path: string, root: string): boolean {
+  const child = relative(root, path);
+  return child === "" || (!child.startsWith("..") && !isAbsolute(child));
+}
+
+function isSensitiveOutboundPath(path: string): boolean {
+  return path
+    .split(/[\\/]+/)
+    .some((part) =>
+      /^(?:\.git|\.env(?:\..*)?|credentials?|secrets?|id_(?:rsa|ecdsa|ed25519)|.*\.(?:key|pem|p12|pfx))$/i.test(
+        part,
+      ),
+    );
+}
+
+async function assertPathHasNoSymlinkComponents(path: string): Promise<void> {
+  const absolute = resolve(path);
+  const root = parse(absolute).root;
+  let current = root;
+  for (const part of absolute.slice(root.length).split(sep).filter(Boolean)) {
+    current = join(current, part);
+    if ((await lstat(current)).isSymbolicLink()) {
+      throw new Error("desktop eXpress media path contains a symlink");
+    }
+  }
+}
+
+function classifyDesktopOutboundFile(path: string): DesktopOutboundKind {
+  const extension = extname(path).toLowerCase();
+  if (
+    [".bmp", ".gif", ".ico", ".jpeg", ".jpg", ".png", ".webp"].includes(
+      extension,
+    )
+  ) {
+    return "image";
+  }
+  if (
+    [
+      ".3g2",
+      ".3gp",
+      ".avi",
+      ".m4v",
+      ".mkv",
+      ".mov",
+      ".mp4",
+      ".mpeg",
+      ".mpg",
+      ".ogv",
+      ".webm",
+    ].includes(extension)
+  ) {
+    return "video";
+  }
+  return "document";
+}
+
+export function desktopInputSelectorFor(kind: DesktopOutboundKind): string {
+  if (kind === "image") return DESKTOP_IMAGE_INPUT_SELECTOR;
+  if (kind === "video") return DESKTOP_VIDEO_INPUT_SELECTOR;
+  return DESKTOP_DOCUMENT_INPUT_SELECTOR;
+}
+
+export async function validateDesktopOutboundFile(
+  mediaPath: string,
+  maxMb = DEFAULT_DESKTOP_MEDIA_MAX_MB,
+  allowedRoots?: string[],
+): Promise<DesktopOutboundFile> {
+  if (
+    !Number.isFinite(maxMb) ||
+    maxMb <= 0 ||
+    maxMb > MAX_DESKTOP_MEDIA_MAX_MB
+  ) {
+    throw new Error("desktop eXpress media size limit is invalid");
+  }
+  const path = resolveLocalMediaPath(mediaPath);
+  let file;
+  try {
+    file = await lstat(path);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      throw new Error("desktop eXpress media file does not exist");
+    }
+    throw error;
+  }
+  if (!file.isFile()) {
+    throw new Error("desktop eXpress media path is not a regular file");
+  }
+  await assertPathHasNoSymlinkComponents(path);
+  const canonicalPath = await realpath(path);
+  const canonicalFile = await lstat(canonicalPath);
+  if (
+    !canonicalFile.isFile() ||
+    canonicalFile.dev !== file.dev ||
+    canonicalFile.ino !== file.ino ||
+    canonicalFile.size !== file.size
+  ) {
+    throw new Error("desktop eXpress media file changed during validation");
+  }
+  const roots = allowedRoots?.length
+    ? allowedRoots.map(resolveUserPath)
+    : defaultDesktopMediaRoots();
+  let insideAllowedRoot = false;
+  for (const root of roots) {
+    try {
+      if (isWithinRoot(canonicalPath, await realpath(root))) {
+        insideAllowedRoot = true;
+        break;
+      }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+  }
+  if (!insideAllowedRoot) {
+    throw new Error("desktop eXpress media file is outside allowed roots");
+  }
+  if (isSensitiveOutboundPath(canonicalPath)) {
+    throw new Error("desktop eXpress refuses credential-like media paths");
+  }
+  const maxBytes = Math.floor(maxMb * 1024 * 1024);
+  if (file.size > maxBytes) {
+    throw new Error(`desktop eXpress media file exceeds the ${maxMb} MB limit`);
+  }
+  return {
+    path: canonicalPath,
+    size: file.size,
+    kind: classifyDesktopOutboundFile(canonicalPath),
+    device: file.dev,
+    inode: file.ino,
+    mtimeMs: file.mtimeMs,
+  };
+}
+
+async function assertDesktopOutboundFileUnchanged(
+  file: DesktopOutboundFile,
+): Promise<void> {
+  await assertPathHasNoSymlinkComponents(file.path);
+  const current = await lstat(file.path);
+  if (
+    !current.isFile() ||
+    current.dev !== file.device ||
+    current.ino !== file.inode ||
+    current.size !== file.size ||
+    current.mtimeMs !== file.mtimeMs
+  ) {
+    throw new Error("desktop eXpress media file changed before delivery");
+  }
 }
 
 export function normalizeLoopbackCdpUrl(value: string): string {
@@ -237,12 +467,48 @@ export function buildDesktopSnapshotExpression(): string {
     }
     const chatRoot = document.querySelector('.chat');
     const titleNode = document.querySelector('.chat-header-title-container__text');
-    const messages = [...document.querySelectorAll('.chat-message-row--opponent .chat-message[data-message-type="text"]')]
-      .map((node) => ({
-        id: String(node.id || '').trim(),
-        text: String(node.querySelector('.chat-message__text')?.innerText || '').trim(),
-      }))
-      .filter((message) => uuid.test(message.id) && message.text.length > 0);
+    function findMessage(node, messageId) {
+      const fiberKey = Object.getOwnPropertyNames(node).find((key) => key.startsWith('__reactFiber$'));
+      let fiber = fiberKey ? node[fiberKey] : null;
+      for (let index = 0; fiber && index < 30; index += 1, fiber = fiber.return) {
+        const message = fiber.memoizedProps?.message;
+        if (message?.syncId === messageId && message.payload && typeof message.payload === 'object') return message;
+      }
+      return null;
+    }
+    function attachmentKind(payloadType) {
+      if (payloadType === 'image') return 'image';
+      if (payloadType === 'audio' || payloadType === 'voice') return 'audio';
+      if (payloadType === 'video') return 'video';
+      return 'file';
+    }
+    const supportedTypes = new Set(['text', 'document', 'image', 'audio', 'voice', 'video']);
+    const messages = [...document.querySelectorAll('.chat-message-row--opponent .chat-message')]
+      .map((node) => {
+        const id = String(node.id || '').trim();
+        const message = findMessage(node, id);
+        const senderId = String(message?.sender?.userHuid || message?.payload?.from || '').trim();
+        const type = node.getAttribute('data-message-type');
+        if (!supportedTypes.has(type)) return null;
+        const text = String(message?.payload?.body || node.querySelector('.chat-message__text')?.innerText || '').trim();
+        if (type === 'text') return { id, senderId, type, text };
+        const file = message?.payload?.payload;
+        const mimeType = String(file?.fileMimeType || 'application/octet-stream').trim().toLowerCase();
+        return {
+          id,
+          senderId,
+          type,
+          text,
+          attachment: {
+            fileId: String(file?.fileId || '').trim(),
+            fileName: String(file?.fileName || '').trim(),
+            fileSize: file?.fileSize,
+            mimeType,
+            kind: attachmentKind(type),
+          },
+        };
+      })
+      .filter((message) => message && uuid.test(message.id) && (message.text.length > 0 || message.attachment));
     const own = [...document.querySelectorAll('.chat-message__bubble--my')]
       .map((node) => node.closest('.chat-message'))
       .filter(Boolean);
@@ -275,6 +541,129 @@ function buildFocusComposerExpression(): string {
     if (!editor) return false;
     editor.focus();
     return true;
+  })()`;
+}
+
+function buildAttachmentLookupExpression(messageId: string): string {
+  const expected = JSON.stringify(messageId);
+  return `(() => {
+    const expected = ${expected};
+    const node = document.getElementById(expected);
+    const supportedTypes = new Set(['document', 'image', 'audio', 'voice', 'video']);
+    if (!node || !supportedTypes.has(node.getAttribute('data-message-type')) || !node.closest('.chat-message-row--opponent')) return null;
+    const fiberKey = Object.getOwnPropertyNames(node).find((key) => key.startsWith('__reactFiber$'));
+    let fiber = fiberKey ? node[fiberKey] : null;
+    let message = null;
+    let loadAttachment = null;
+    for (let index = 0; fiber && index < 30; index += 1, fiber = fiber.return) {
+      const props = fiber.memoizedProps;
+      if (props?.message?.syncId === expected) {
+        message ||= props.message;
+        if (typeof props.loadAttachment === 'function') {
+          loadAttachment ||= props.loadAttachment;
+        }
+      }
+    }
+    let documentOnClick = null;
+    const descendants = [...node.querySelectorAll('*')];
+    for (const descendant of descendants) {
+      const descendantFiberKey = Object.getOwnPropertyNames(descendant).find((key) => key.startsWith('__reactFiber$'));
+      let descendantFiber = descendantFiberKey ? descendant[descendantFiberKey] : null;
+      for (let index = 0; descendantFiber && index < 15; index += 1, descendantFiber = descendantFiber.return) {
+        const props = descendantFiber.memoizedProps;
+        const componentName = String(
+          descendantFiber.elementType?.displayName ||
+          descendantFiber.elementType?.name ||
+          descendantFiber.type?.displayName ||
+          descendantFiber.type?.name ||
+          '',
+        );
+        if (
+          componentName === 'MessageEntryDocument' &&
+          props?.message?.syncId === expected &&
+          typeof props.onClick === 'function'
+        ) {
+          documentOnClick = props.onClick;
+          break;
+        }
+      }
+      if (documentOnClick) break;
+    }
+    return message
+      ? { message, type: node.getAttribute('data-message-type'), loadAttachment, documentOnClick }
+      : null;
+  })()`;
+}
+
+export function buildDesktopAttachmentStartExpression(
+  messageId: string,
+): string {
+  const lookup = buildAttachmentLookupExpression(messageId);
+  return `(() => {
+    const found = ${lookup};
+    if (!found) throw new Error('desktop attachment message is unavailable');
+    if (found.message.payload?.fileBlob) return 'ready';
+    if (found.type === 'document') {
+      if (typeof found.documentOnClick !== 'function') throw new Error('desktop document attachment loader is unavailable');
+      found.documentOnClick({ downloadToBlob: true });
+    } else {
+      if (typeof found.loadAttachment !== 'function') throw new Error('desktop attachment loader is unavailable');
+      found.loadAttachment({ message: found.message, downloadToBlob: true });
+    }
+    return 'started';
+  })()`;
+}
+
+function buildResolveAttachmentBlobSource(messageId: string): string {
+  const lookup = buildAttachmentLookupExpression(messageId);
+  return `async () => {
+    const found = ${lookup};
+    if (!found) return null;
+    const value = found.message.payload?.fileBlob;
+    if (value instanceof Blob) return value;
+    if (typeof value === 'string' && value.startsWith('blob:file:')) {
+      const response = await fetch(value, { credentials: 'omit', cache: 'no-store' });
+      if (!response.ok) throw new Error('desktop attachment blob could not be read');
+      return response.blob();
+    }
+    if (value != null) throw new Error('desktop attachment blob has an unsafe form');
+    return null;
+  }`;
+}
+
+export function buildDesktopAttachmentStatusExpression(
+  messageId: string,
+): string {
+  const resolveBlob = buildResolveAttachmentBlobSource(messageId);
+  return `(async () => {
+    const blob = await (${resolveBlob})();
+    return blob
+      ? { ready: true, size: blob.size, mimeType: blob.type || null }
+      : { ready: false, size: null, mimeType: null };
+  })()`;
+}
+
+export function buildDesktopAttachmentChunkExpression(
+  messageId: string,
+  offset: number,
+  length: number,
+): string {
+  if (!Number.isSafeInteger(offset) || offset < 0) {
+    throw new Error("desktop attachment chunk offset is invalid");
+  }
+  if (!Number.isSafeInteger(length) || length < 1) {
+    throw new Error("desktop attachment chunk length is invalid");
+  }
+  const resolveBlob = buildResolveAttachmentBlobSource(messageId);
+  return `(async () => {
+    const blob = await (${resolveBlob})();
+    if (!blob) throw new Error('desktop attachment blob is unavailable');
+    const bytes = new Uint8Array(await blob.slice(${offset}, ${offset + length}).arrayBuffer());
+    let binary = '';
+    for (let index = 0; index < bytes.length; index += 0x8000) {
+      binary += String.fromCharCode(...bytes.subarray(index, index + 0x8000));
+    }
+    return { base64: btoa(binary), size: bytes.length };
   })()`;
 }
 
@@ -415,6 +804,187 @@ export class ExpressDesktopClient {
     );
   }
 
+  async downloadAttachment(
+    message: DesktopMessage,
+    maxBytes: number,
+  ): Promise<DesktopDownloadedAttachment> {
+    const attachment = message.attachment;
+    if (message.type === "text" || !attachment) {
+      throw new Error("desktop inbound message has no file attachment");
+    }
+    if (
+      !Number.isSafeInteger(maxBytes) ||
+      maxBytes < 1 ||
+      maxBytes > MAX_DESKTOP_MEDIA_MAX_MB * 1024 * 1024
+    ) {
+      throw new Error("desktop inbound media limit is invalid");
+    }
+    if (attachment.fileSize > maxBytes) {
+      throw new Error("desktop inbound attachment exceeds the media limit");
+    }
+
+    const before = await this.snapshot();
+    this.assertSnapshotAllowed(before);
+    const visible = before.messages.find((entry) => entry.id === message.id);
+    if (
+      !visible?.attachment ||
+      visible.senderId !== message.senderId ||
+      visible.attachment.fileId !== attachment.fileId ||
+      visible.attachment.fileName !== attachment.fileName ||
+      visible.attachment.fileSize !== attachment.fileSize ||
+      visible.attachment.mimeType.toLowerCase() !== attachment.mimeType
+    ) {
+      throw new Error("desktop inbound attachment is no longer allowlisted");
+    }
+
+    await this.evaluate<string>(
+      buildDesktopAttachmentStartExpression(message.id),
+    );
+    let status: DesktopAttachmentStatus | null = null;
+    for (let attempt = 0; attempt < 80; attempt += 1) {
+      status = await this.evaluate<DesktopAttachmentStatus>(
+        buildDesktopAttachmentStatusExpression(message.id),
+      );
+      if (status.ready) break;
+      await new Promise((resolvePromise) => setTimeout(resolvePromise, 250));
+    }
+    if (!status?.ready || status.size == null) {
+      throw new Error(
+        "desktop inbound attachment was not loaded by the official client",
+      );
+    }
+    if (status.size !== attachment.fileSize) {
+      throw new Error(
+        "desktop inbound attachment size does not match metadata",
+      );
+    }
+    if (status.size > maxBytes) {
+      throw new Error("desktop inbound attachment exceeds the media limit");
+    }
+    if (
+      Math.ceil(status.size / DESKTOP_ATTACHMENT_CHUNK_BYTES) >
+      MAX_DESKTOP_ATTACHMENT_CHUNKS
+    ) {
+      throw new Error("desktop inbound attachment exceeds the chunk limit");
+    }
+    if (status.mimeType && status.mimeType !== attachment.mimeType) {
+      throw new Error("desktop inbound attachment MIME type does not match");
+    }
+
+    const chunks: Buffer[] = [];
+    let total = 0;
+    for (
+      let offset = 0;
+      offset < status.size;
+      offset += DESKTOP_ATTACHMENT_CHUNK_BYTES
+    ) {
+      const expected = Math.min(
+        DESKTOP_ATTACHMENT_CHUNK_BYTES,
+        status.size - offset,
+      );
+      const result = await this.evaluate<{ base64: string; size: number }>(
+        buildDesktopAttachmentChunkExpression(message.id, offset, expected),
+      );
+      const chunk = Buffer.from(result.base64, "base64");
+      if (result.size !== expected || chunk.length !== expected) {
+        throw new Error("desktop inbound attachment chunk is incomplete");
+      }
+      if (chunks.length >= MAX_DESKTOP_ATTACHMENT_CHUNKS) {
+        throw new Error("desktop inbound attachment exceeds the chunk limit");
+      }
+      chunks.push(chunk);
+      total += chunk.length;
+      if (total > maxBytes) {
+        throw new Error("desktop inbound attachment exceeds the media limit");
+      }
+    }
+    const buffer = Buffer.concat(chunks, total);
+    if (buffer.length !== attachment.fileSize) {
+      throw new Error("desktop inbound attachment is incomplete");
+    }
+    const after = await this.snapshot();
+    this.assertSnapshotAllowed(after);
+    const afterMessage = after.messages.find(
+      (entry) => entry.id === message.id,
+    );
+    if (
+      !afterMessage?.attachment ||
+      afterMessage.senderId !== message.senderId ||
+      afterMessage.type !== message.type ||
+      afterMessage.attachment.fileId !== attachment.fileId ||
+      afterMessage.attachment.fileName !== attachment.fileName ||
+      afterMessage.attachment.fileSize !== attachment.fileSize ||
+      afterMessage.attachment.mimeType.toLowerCase() !== attachment.mimeType
+    ) {
+      throw new Error("desktop inbound attachment metadata changed");
+    }
+    return { ...attachment, buffer };
+  }
+
+  async sendFile(
+    targetChatId: string,
+    file: DesktopOutboundFile,
+  ): Promise<string> {
+    if (targetChatId !== this.config.chatId) {
+      throw new Error("desktop outbound target is not allowlisted");
+    }
+    const before = await this.snapshot();
+    this.assertSnapshotAllowed(before);
+    if (!before.composerReady) {
+      throw new Error("desktop message composer is unavailable");
+    }
+
+    const rpc = this.requireRpc();
+    const document = await rpc.request(
+      "DOM.getDocument",
+      { depth: 1, pierce: true },
+      this.timeoutMs,
+    );
+    const root = document.root as CdpDomNode | undefined;
+    if (!root?.nodeId) {
+      throw new Error("desktop eXpress DOM root is unavailable");
+    }
+    const selector = desktopInputSelectorFor(file.kind);
+    const match = await rpc.request(
+      "DOM.querySelector",
+      { nodeId: root.nodeId, selector },
+      this.timeoutMs,
+    );
+    const nodeId = match.nodeId as number | undefined;
+    if (!nodeId) {
+      throw new Error(`desktop eXpress ${file.kind} input is unavailable`);
+    }
+    const immediatelyBeforeSend = await this.snapshot();
+    this.assertSnapshotAllowed(immediatelyBeforeSend);
+    if (
+      immediatelyBeforeSend.lastOwnMessageId !== before.lastOwnMessageId ||
+      !immediatelyBeforeSend.composerReady
+    ) {
+      throw new Error("desktop eXpress chat changed before file delivery");
+    }
+    await assertDesktopOutboundFileUnchanged(file);
+    await rpc.request(
+      "DOM.setFileInputFiles",
+      { files: [file.path], nodeId },
+      this.timeoutMs,
+    );
+
+    for (let attempt = 0; attempt < 80; attempt += 1) {
+      await new Promise((resolvePromise) => setTimeout(resolvePromise, 250));
+      const after = await this.snapshot();
+      this.assertSnapshotAllowed(after);
+      if (
+        after.lastOwnMessageId &&
+        after.lastOwnMessageId !== before.lastOwnMessageId
+      ) {
+        return after.lastOwnMessageId;
+      }
+    }
+    throw new Error(
+      "desktop outbound file was not confirmed by the official client",
+    );
+  }
+
   private async evaluate<T>(expression: string): Promise<T> {
     await this.connect();
     const result = await this.requireRpc().request(
@@ -447,6 +1017,7 @@ export class DesktopDedupeStore {
       const state = JSON.parse(
         await readFile(resolveUserPath(this.statePath), "utf8"),
       ) as DedupeState;
+      if (state.version !== 2) return false;
       for (const id of state.seen ?? []) this.seen.add(id);
       return true;
     } catch (error) {
@@ -483,7 +1054,7 @@ export class DesktopDedupeStore {
     await chmod(directory, 0o700);
     const temporary = `${path}.${process.pid}.tmp`;
     const state: DedupeState = {
-      version: 1,
+      version: 2,
       seen: [...this.seen],
       updatedAt: new Date().toISOString(),
     };
@@ -506,8 +1077,14 @@ export async function isDesktopOutboundUnlocked(
   const switchPath = account.config.desktopOutboundSwitchPath;
   if (!switchPath) return false;
   try {
-    await access(resolveUserPath(switchPath));
-    return true;
+    const state = await lstat(resolveUserPath(switchPath));
+    const currentUid = process.getuid?.();
+    return (
+      state.isFile() &&
+      !state.isSymbolicLink() &&
+      (state.mode & 0o777) === 0o600 &&
+      (currentUid == null || state.uid === currentUid)
+    );
   } catch {
     return false;
   }
@@ -557,6 +1134,32 @@ export async function sendExpressDesktopMessage(
   const client = desktopClientFromAccount(account);
   try {
     return await client.sendText(targetChatId, text);
+  } finally {
+    client.close();
+  }
+}
+
+export async function sendExpressDesktopFile(
+  account: ResolvedExpressAccount,
+  targetChatId: string,
+  mediaPath: string,
+): Promise<string> {
+  if (!(await isDesktopOutboundUnlocked(account))) {
+    throw new Error("desktop eXpress outbound is locked");
+  }
+  const file = await validateDesktopOutboundFile(
+    mediaPath,
+    account.config.mediaMaxMb ?? DEFAULT_DESKTOP_MEDIA_MAX_MB,
+    account.config.desktopMediaRoots,
+  );
+  if (!(await isDesktopOutboundUnlocked(account))) {
+    throw new Error(
+      "desktop eXpress outbound was locked during file validation",
+    );
+  }
+  const client = desktopClientFromAccount(account);
+  try {
+    return await client.sendFile(targetChatId, file);
   } finally {
     client.close();
   }

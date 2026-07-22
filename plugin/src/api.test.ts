@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   BotXApiError,
+  downloadFile,
   getCachedToken,
   getToken,
   invalidateToken,
@@ -49,6 +50,7 @@ describe("BotX API", () => {
         expect.stringContaining(`/api/v3/botx/bots/${MOCK_BOT_ID}/token`),
         expect.objectContaining({
           method: "POST",
+          redirect: "error",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ secret_key: MOCK_SECRET }),
         }),
@@ -85,6 +87,18 @@ describe("BotX API", () => {
       await expect(
         getToken(MOCK_CTS, MOCK_BOT_ID, MOCK_SECRET),
       ).rejects.toThrow(BotXApiError);
+    });
+
+    it("rejects unsafe CTS origins before sending credentials", async () => {
+      global.fetch = vi.fn();
+
+      await expect(
+        getToken("http://cts.example.com", MOCK_BOT_ID, MOCK_SECRET),
+      ).rejects.toThrow(/credential-free HTTPS/);
+      await expect(
+        getToken("https://user:pass@cts.example.com", MOCK_BOT_ID, MOCK_SECRET),
+      ).rejects.toThrow(/credential-free HTTPS/);
+      expect(global.fetch).not.toHaveBeenCalled();
     });
   });
 
@@ -177,6 +191,7 @@ describe("BotX API", () => {
         expect.stringContaining("/api/v3/botx/notifications/direct"),
         expect.objectContaining({
           method: "POST",
+          redirect: "error",
           headers: expect.objectContaining({
             Authorization: "Bearer jwt-token",
           }),
@@ -212,6 +227,80 @@ describe("BotX API", () => {
       await expect(
         sendMessage(MOCK_CTS, "token", "chat-uuid", "Hello"),
       ).rejects.toThrow(BotXApiError);
+    });
+  });
+
+  describe("downloadFile", () => {
+    it("sends CTS authorization only to the configured CTS origin", async () => {
+      global.fetch = vi
+        .fn()
+        .mockResolvedValueOnce(new Response(new Uint8Array([1, 2, 3])));
+
+      await expect(
+        downloadFile(MOCK_CTS, "jwt-token", "/files/report.pdf"),
+      ).resolves.toEqual(Buffer.from([1, 2, 3]));
+      expect(global.fetch).toHaveBeenCalledWith(
+        "https://cts.test.com/files/report.pdf",
+        expect.objectContaining({
+          method: "GET",
+          redirect: "error",
+          headers: { Authorization: "Bearer jwt-token" },
+        }),
+      );
+    });
+
+    it("rejects cross-origin and credential-bearing file URLs before fetch", async () => {
+      global.fetch = vi.fn();
+
+      await expect(
+        downloadFile(
+          MOCK_CTS,
+          "jwt-token",
+          "https://attacker.example/report.pdf",
+        ),
+      ).rejects.toThrow(/outside the configured CTS origin/);
+      await expect(
+        downloadFile(
+          MOCK_CTS,
+          "jwt-token",
+          "https://user:pass@cts.test.com/report.pdf",
+        ),
+      ).rejects.toThrow(/outside the configured CTS origin/);
+      expect(global.fetch).not.toHaveBeenCalled();
+    });
+
+    it("enforces the byte limit before and during streaming", async () => {
+      global.fetch = vi
+        .fn()
+        .mockResolvedValueOnce(
+          new Response(new Uint8Array([1, 2, 3]), {
+            headers: { "content-length": "3" },
+          }),
+        )
+        .mockResolvedValueOnce(new Response(new Uint8Array([1, 2, 3])));
+
+      await expect(
+        downloadFile(MOCK_CTS, "jwt-token", "/files/report.pdf", 2),
+      ).rejects.toThrow(/media limit/);
+      await expect(
+        downloadFile(MOCK_CTS, "jwt-token", "/files/report.pdf", 2),
+      ).rejects.toThrow(/media limit/);
+    });
+
+    it("bounds the number of streamed chunks", async () => {
+      const stream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new Uint8Array([1]));
+          controller.enqueue(new Uint8Array([2]));
+          controller.enqueue(new Uint8Array([3]));
+          controller.close();
+        },
+      });
+      global.fetch = vi.fn().mockResolvedValueOnce(new Response(stream));
+
+      await expect(
+        downloadFile(MOCK_CTS, "jwt-token", "/files/report.pdf", 10, 2),
+      ).rejects.toThrow(/chunk limit/);
     });
   });
 });

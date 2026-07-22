@@ -1,5 +1,50 @@
 # Release notes
 
+## 1.1.0
+
+Desktop file transfer and fail-closed BotX hardening.
+
+### Added
+
+- Receive desktop document, image, audio/voice and video attachments through the
+  official client's verified `MessageEntryDocument.onClick` or
+  `MessageEntry.loadAttachment` download-to-blob path. Client 3.68.44 stores the
+  attachment metadata at `message.payload.payload` and the resulting
+  `blob:file:` URL at `message.payload.fileBlob`.
+- Preserve file name, MIME type and OpenClaw media context while moving bounded
+  blobs in 512 KiB chunks.
+- Send local files with OpenClaw `sendMedia` through the official client's exact
+  document, image or video input; captions remain separate text messages.
+- Configure additional exact outbound roots with `desktopMediaRoots`; the default
+  root is limited to OpenClaw's media directory.
+- Added tests for attachment metadata, exact sender checks, blob chunking, local
+  path policy, symlinks, interlocks, CTS origins, redirects and stream limits.
+
+### Security
+
+- Removed the unsigned per-account BotX listener from the active lifecycle.
+  BotX inbound now fails closed until verified JWT v2 authentication and the
+  OpenClaw shared-listener contract are implemented.
+- Removed the unused private task queue and its manual inbound bypass.
+- CTS secret/Bearer requests reject redirects. Downloads accept only the
+  configured CTS origin and enforce both declared and streamed byte counts.
+- Desktop outbound requires an owner-controlled mode-0600 regular switch file;
+  symlinks and permissive switch files do not unlock delivery.
+- Desktop files must be regular, non-symlink local files below canonical allowed
+  roots, below the configured limit, and outside credential-like paths.
+
+### Compatibility and limits
+
+- Bridge version 1.1.0 ships plugin 2.2.0 for OpenClaw `2026.7.1-2` or newer.
+- BotX text delivery remains supported. BotX file upload is explicitly unsupported
+  and is never represented by a fake text link.
+- The retained BotX text path is the legacy CTS bearer-token exchange; this
+  release does not claim JWT v2 inbound verification or CTS v2 request signing.
+- Audio and unknown outbound extensions use the document input. Reactions,
+  chat/thread creation, typing indicators, shared BotX listener routing and full
+  bidirectional Markdown conversion remain outside this release.
+- No live eXpress send was performed by the automated suite.
+
 ## 1.0.1
 
 Baseline compatibility update.

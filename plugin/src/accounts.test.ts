@@ -208,12 +208,16 @@ describe("eXpress Account Resolution", () => {
             ctsUrl: "https://cts.com",
             dmPolicy: "allowlist",
             allowFrom: ["huid-1", "huid-2"],
+            markdown: { tables: "bullets" },
+            actions: { send: "allowlist" },
           },
         },
       };
       const account = resolveExpressAccount({ cfg });
       expect(account.config.dmPolicy).toBe("allowlist");
       expect(account.config.allowFrom).toEqual(["huid-1", "huid-2"]);
+      expect(account.config.markdown).toEqual({ tables: "bullets" });
+      expect(account.config.actions).toEqual({ send: "allowlist" });
     });
   });
 });

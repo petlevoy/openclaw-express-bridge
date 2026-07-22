@@ -107,7 +107,7 @@ export const expressSetupWizard: ChannelSetupWizard = {
     lines: [
       "eXpress messenger bot requires a BotX API botId, secretKey, and CTS server URL.",
       "Obtain these from your eXpress CTS admin panel.",
-      "The bot receives messages via webhook (ensure port 18790 is reachable).",
+      "BotX setup currently enables outbound text only; inbound remains disabled until verified JWT v2/shared-listener support exists.",
       `Docs: ${formatDocsLink("/channels/express", "channels/express")}`,
     ],
   },
@@ -234,29 +234,7 @@ export const expressSetupWizard: ChannelSetupWizard = {
     },
   ],
 
-  textInputs: [
-    {
-      inputKey: "httpPort" as keyof ChannelSetupInput,
-      message: "Webhook port (default: 18790)",
-      placeholder: "18790",
-      required: false,
-
-      shouldPrompt: ({ cfg, accountId }) => {
-        const account = resolveExpressAccount({ cfg, accountId });
-        return !account.config.webhookPort;
-      },
-
-      applySet: ({ cfg, accountId, value }) => {
-        const port = parseInt(value.trim(), 10);
-        if (!port || isNaN(port)) return cfg;
-        return applyAccountConfig({
-          cfg,
-          accountId,
-          patch: { webhookPort: port },
-        });
-      },
-    },
-  ],
+  textInputs: [],
 
   finalize: ({ cfg, accountId: _accountId }) => {
     return {
