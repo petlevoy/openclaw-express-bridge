@@ -507,6 +507,20 @@ export function buildDesktopSnapshotExpression(): string {
       if (payloadType === 'video') return 'video';
       return 'file';
     }
+    function findFilePayload(message) {
+      const candidates = [
+        message?.payload?.payload,
+        message?.payload?.file,
+        message?.payload,
+      ];
+      return candidates.find((candidate) =>
+        candidate &&
+        typeof candidate === 'object' &&
+        typeof candidate.fileId === 'string' &&
+        typeof candidate.fileName === 'string' &&
+        Number.isSafeInteger(candidate.fileSize),
+      ) || null;
+    }
     const supportedTypes = new Set(['text', 'document', 'image', 'audio', 'voice', 'video']);
     const messages = [...document.querySelectorAll('.chat-message-row--opponent .chat-message')]
       .map((node) => {
@@ -517,7 +531,7 @@ export function buildDesktopSnapshotExpression(): string {
         if (!supportedTypes.has(type)) return null;
         const text = String(message?.payload?.body || node.querySelector('.chat-message__text')?.innerText || '').trim();
         if (type === 'text') return { id, senderId, type, text };
-        const file = message?.payload?.payload;
+        const file = findFilePayload(message);
         const mimeType = String(file?.fileMimeType || 'application/octet-stream').trim().toLowerCase();
         return {
           id,
@@ -580,10 +594,12 @@ function buildAttachmentLookupExpression(messageId: string): string {
     let fiber = fiberKey ? node[fiberKey] : null;
     let message = null;
     let loadAttachment = null;
+    let attachmentMessage = null;
     for (let index = 0; fiber && index < 30; index += 1, fiber = fiber.return) {
       const props = fiber.memoizedProps;
       if (props?.message?.syncId === expected) {
         message ||= props.message;
+        if (props.message?.msgId === expected) attachmentMessage ||= props.message;
         if (typeof props.loadAttachment === 'function') {
           loadAttachment ||= props.loadAttachment;
         }
@@ -606,34 +622,58 @@ function buildAttachmentLookupExpression(messageId: string): string {
         if (
           componentName === 'MessageEntryDocument' &&
           props?.message?.syncId === expected &&
-          typeof props.onClick === 'function'
+          props.message?.msgId === expected
         ) {
-          documentOnClick = props.onClick;
-          break;
+          attachmentMessage ||= props.message;
+          if (typeof props.onClick === 'function') {
+            documentOnClick = props.onClick;
+            break;
+          }
         }
       }
       if (documentOnClick) break;
     }
     return message
-      ? { message, type: node.getAttribute('data-message-type'), loadAttachment, documentOnClick }
+      ? { message, attachmentMessage, type: node.getAttribute('data-message-type'), loadAttachment, documentOnClick }
       : null;
   })()`;
+}
+
+function buildAttachmentBlobCandidatesSource(): string {
+  return `function attachmentBlobCandidates(found) {
+    return [
+      found.message?.payload?.payload?.fileBlob,
+      found.message?.payload?.file?.fileBlob,
+      found.message?.payload?.fileBlob,
+      found.message?.fileBlob,
+      found.attachmentMessage?.payload?.fileBlob,
+      found.attachmentMessage?.payload?.payload?.fileBlob,
+      found.attachmentMessage?.fileBlob,
+    ].filter((value) => value != null);
+  }`;
 }
 
 export function buildDesktopAttachmentStartExpression(
   messageId: string,
 ): string {
   const lookup = buildAttachmentLookupExpression(messageId);
+  const blobCandidates = buildAttachmentBlobCandidatesSource();
   return `(() => {
     const found = ${lookup};
     if (!found) throw new Error('desktop attachment message is unavailable');
-    if (found.message.payload?.payload?.fileBlob || found.message.payload?.fileBlob) return 'ready';
+    ${blobCandidates}
+    if (attachmentBlobCandidates(found).length > 0) return 'ready';
     if (found.type === 'document') {
-      if (typeof found.documentOnClick !== 'function') throw new Error('desktop document attachment loader is unavailable');
-      found.documentOnClick({ downloadToBlob: true });
+      if (typeof found.documentOnClick === 'function') {
+        found.documentOnClick({ downloadToBlob: true });
+      } else if (typeof found.loadAttachment === 'function' && found.attachmentMessage) {
+        found.loadAttachment({ message: found.attachmentMessage, downloadToBlob: true });
+      } else {
+        throw new Error('desktop document attachment loader is unavailable');
+      }
     } else {
       if (typeof found.loadAttachment !== 'function') throw new Error('desktop attachment loader is unavailable');
-      found.loadAttachment({ message: found.message, downloadToBlob: true });
+      found.loadAttachment({ message: found.attachmentMessage || found.message, downloadToBlob: true });
     }
     return 'started';
   })()`;
@@ -641,10 +681,16 @@ export function buildDesktopAttachmentStartExpression(
 
 function buildResolveAttachmentBlobSource(messageId: string): string {
   const lookup = buildAttachmentLookupExpression(messageId);
+  const blobCandidates = buildAttachmentBlobCandidatesSource();
   return `async () => {
     const found = ${lookup};
     if (!found) return null;
-    const value = found.message.payload?.payload?.fileBlob ?? found.message.payload?.fileBlob;
+    ${blobCandidates}
+    const candidates = attachmentBlobCandidates(found);
+    const value = candidates[0];
+    if (candidates.some((candidate) => candidate !== value)) {
+      throw new Error('desktop attachment blob source is ambiguous');
+    }
     if (value instanceof Blob) return value;
     if (typeof value === 'string' && value.startsWith('blob:file:')) {
       const response = await fetch(value, { credentials: 'omit', cache: 'no-store' });
@@ -690,6 +736,26 @@ export function buildDesktopAttachmentChunkExpression(
     }
     return { base64: btoa(binary), size: bytes.length };
   })()`;
+}
+
+export function isDesktopAttachmentMimeCompatible(
+  declaredMimeType: string,
+  blobMimeType: string | null,
+): boolean {
+  const declared = declaredMimeType.trim().toLowerCase();
+  const actual = blobMimeType?.trim().toLowerCase() ?? "";
+  if (!actual || actual === declared || actual === "application/octet-stream") {
+    return true;
+  }
+  const openXmlTypes = new Set([
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+  ]);
+  return (
+    openXmlTypes.has(declared) &&
+    (actual === "application/zip" || actual === "application/x-zip-compressed")
+  );
 }
 
 function extractEvaluationValue<T>(result: Record<string, unknown>): T {
@@ -894,7 +960,9 @@ export class ExpressDesktopClient {
     ) {
       throw new Error("desktop inbound attachment exceeds the chunk limit");
     }
-    if (status.mimeType && status.mimeType !== attachment.mimeType) {
+    if (
+      !isDesktopAttachmentMimeCompatible(attachment.mimeType, status.mimeType)
+    ) {
       throw new Error("desktop inbound attachment MIME type does not match");
     }
 

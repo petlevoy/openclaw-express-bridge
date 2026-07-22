@@ -1,5 +1,12 @@
 # Release notes
 
+## 1.1.2
+
+- Ships plugin 2.2.2 with the live eXpress 3.68.44 document component shape covered by regression tests: the message envelope remains on `MessageEntry`, while `MessageEntryDocument` passes the nested document payload to its official loader.
+- Accepts the verified nested and compatibility blob locations, rejects conflicting blob sources, and falls back to the official generic loader when a document component does not expose `onClick`.
+- Preserves declared OpenXML MIME metadata when Electron returns an empty, generic octet-stream, or ZIP blob type for DOCX, XLSX, and PPTX files.
+- Rebuilds `dist/` from the checked TypeScript sources during packaging so the installed entry point cannot lag behind the manifest and source tree.
+
 ## 1.1.1
 
 - Ships plugin 2.2.1 with an executable regression fixture for document messages that combine a text body with metadata at `message.payload.payload` and a downloaded blob URL at `message.payload.payload.fileBlob`.

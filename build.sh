@@ -24,6 +24,7 @@ echo "== plugin: deterministic npm install and verification =="
   npm run lint
   npm run typecheck
   npm run format:check
+  npm run build
 )
 
 copy_runtime() {

@@ -1,4 +1,4 @@
-# openclaw-express-bridge 1.1.1
+# openclaw-express-bridge 1.1.2
 
 An installable, fail-closed bridge between OpenClaw and the official eXpress
 Linux desktop client. It runs the client headlessly on an isolated Xvfb display,
@@ -39,7 +39,7 @@ grant was found in the client payload.
 Debian package:
 
 ```bash
-sudo apt install ./openclaw-express-bridge_1.1.1_amd64.deb
+sudo apt install ./openclaw-express-bridge_1.1.2_amd64.deb
 openclaw-express-bridge install
 openclaw-express-bridge install-client
 ```
@@ -47,8 +47,8 @@ openclaw-express-bridge install-client
 Portable archive:
 
 ```bash
-tar -xzf openclaw-express-bridge-1.1.1-linux-amd64.tar.gz
-cd openclaw-express-bridge-1.1.1
+tar -xzf openclaw-express-bridge-1.1.2-linux-amd64.tar.gz
+cd openclaw-express-bridge-1.1.2
 ./install.sh
 ~/.local/bin/openclaw-express-bridge install-client
 ```
@@ -128,13 +128,14 @@ directories and loose permissions keep outbound locked.
 Desktop inbound supports document, image, audio/voice and video entries when the
 official client exposes complete, valid file metadata. For client 3.68.44 the
 bridge invokes `MessageEntryDocument.onClick({downloadToBlob: true})` for
-documents and the enclosing `MessageEntry.loadAttachment` handler for the other
-supported media types. It reads attachment metadata from
-`message.payload.payload`, waits for the downloaded blob at
-`message.payload.payload.fileBlob` (with a compatibility fallback to
-`message.payload.fileBlob`), and copies only a `Blob` or `blob:file:` URL into
-OpenClaw in bounded 512 KiB chunks. File UUID, sender UUID, name, size and MIME
-type are checked before and after the download. The saved path and media type
+documents, with the enclosing `MessageEntry.loadAttachment` handler as an
+official-client fallback and for the other supported media types. It reads
+attachment metadata from `message.payload.payload` or the client's compatible
+file envelope, resolves only verified nested/direct blob fields, and copies only
+a `Blob` or `blob:file:` URL into OpenClaw in bounded 512 KiB chunks. Conflicting
+blob fields fail closed. File UUID, sender UUID, name, size and MIME type are
+checked before and after the download; generic Electron blob types are accepted
+only for compatible OpenXML containers. The saved path and declared media type
 are passed through OpenClaw's standard inbound media context.
 
 Desktop outbound `sendMedia` accepts only a local regular, non-symlink file. The
@@ -165,7 +166,7 @@ streaming. Non-loopback CTS endpoints must use HTTPS.
 
 ## PDF scope matrix
 
-| Requirement | 1.1.1 state |
+| Requirement | 1.1.2 state |
 |---|---|
 | Native OpenClaw channel lifecycle | Implemented |
 | Default/named account configuration | Implemented; concurrent desktop accounts require separate client/CDP sessions |
@@ -248,7 +249,7 @@ Please report suspected vulnerabilities privately as described in
   plugin update after a client upgrade.
 - The public build pins one verified client release; a newer release requires a
   reviewed URL and SHA-256 update in `client.env`.
-- Only Linux amd64 and one exact direct chat are covered by the 1.1.1 bootstrap.
+- Only Linux amd64 and one exact direct chat are covered by the 1.1.2 bootstrap.
 - No live eXpress file was sent by the automated test suite; the desktop file
   contract is covered by unit tests and must be canary-tested in an approved chat.
 - BotX inbound, shared-listener routing, reactions, chat/thread creation and

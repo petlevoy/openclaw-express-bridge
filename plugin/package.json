@@ -1,12 +1,12 @@
 {
   "name": "openclaw-express",
-  "version": "2.2.1",
+  "version": "2.2.2",
   "description": "eXpress channel for OpenClaw — BotX or official Linux desktop bridge",
   "license": "MIT",
   "type": "module",
   "main": "./index.ts",
   "scripts": {
-    "build": "tsc --noEmit && echo 'TypeScript check passed (jiti loads TS directly)'",
+    "build": "rm -rf dist && tsc --noEmit false --outDir dist && echo 'Runtime JavaScript emitted to dist/'",
     "typecheck": "tsc --noEmit",
     "lint": "eslint src/",
     "lint:fix": "eslint src/ --fix",

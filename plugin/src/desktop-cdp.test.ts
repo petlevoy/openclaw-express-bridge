@@ -22,6 +22,7 @@ import {
   DESKTOP_VIDEO_INPUT_SELECTOR,
   DesktopDedupeStore,
   desktopInputSelectorFor,
+  isDesktopAttachmentMimeCompatible,
   isDesktopOutboundUnlocked,
   normalizeLoopbackCdpSocketUrl,
   normalizeLoopbackCdpUrl,
@@ -85,13 +86,12 @@ describe("eXpress desktop CDP bridge", () => {
       "found.documentOnClick({ downloadToBlob: true })",
     );
     expect(expressions).toContain(
-      "found.loadAttachment({ message: found.message, downloadToBlob: true })",
+      "found.loadAttachment({ message: found.attachmentMessage, downloadToBlob: true })",
     );
     expect(expressions).toContain("componentName === 'MessageEntryDocument'");
-    expect(expressions).toContain("found.message.payload?.payload?.fileBlob");
-    expect(expressions).toContain(
-      "found.message.payload?.payload?.fileBlob ?? found.message.payload?.fileBlob",
-    );
+    expect(expressions).toContain("found.message?.payload?.payload?.fileBlob");
+    expect(expressions).toContain("attachmentBlobCandidates(found)");
+    expect(expressions).toContain("found.attachmentMessage?.payload?.fileBlob");
     expect(expressions).toContain("value.startsWith('blob:file:')");
     expect(expressions).toContain("blob.slice(0, 1024)");
     expect(expressions).not.toMatch(/cookie|authorization|bearer/i);
@@ -157,6 +157,11 @@ describe("eXpress desktop CDP bridge", () => {
         payload: filePayload,
       },
     };
+    const documentMessage = {
+      ...message.payload,
+      syncId: messageId,
+      msgId: messageId,
+    };
 
     const messageNode = new FixtureNode();
     messageNode.id = messageId;
@@ -174,7 +179,7 @@ describe("eXpress desktop CDP bridge", () => {
     Object.defineProperty(documentEntry, "__reactFiber$fixture", {
       value: {
         elementType: { name: "MessageEntryDocument" },
-        memoizedProps: { message, onClick },
+        memoizedProps: { message: documentMessage, onClick },
         return: null,
       },
     });
@@ -263,6 +268,344 @@ describe("eXpress desktop CDP bridge", () => {
     );
     expect(Buffer.from(chunk.base64, "base64")).toEqual(Buffer.from(bytes));
     expect(chunk.size).toBe(bytes.length);
+  });
+
+  it("falls back to the official generic loader with the document payload", () => {
+    class FixtureNode {
+      id = "";
+      attributes = new Map<string, string>();
+      descendants: FixtureNode[] = [];
+
+      getAttribute(name: string) {
+        return this.attributes.get(name) ?? null;
+      }
+
+      closest(selector: string) {
+        return selector === ".chat-message-row--opponent" ? this : null;
+      }
+
+      querySelectorAll(selector: string) {
+        return selector === "*" ? this.descendants : [];
+      }
+    }
+
+    const messageId = "00000000-0000-4000-8000-000000000012";
+    const filePayload: {
+      type: string;
+      fileId: string;
+      fileName: string;
+      fileSize: number;
+      fileMimeType: string;
+      fileBlob?: string;
+    } = {
+      type: "document",
+      fileId: messageId,
+      fileName: "report.xlsx",
+      fileSize: 16,
+      fileMimeType:
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    };
+    const documentMessage = {
+      type: "document",
+      msgId: messageId,
+      syncId: messageId,
+      payload: filePayload,
+    };
+    const message = {
+      syncId: messageId,
+      payload: documentMessage,
+    };
+    const loadAttachment = ({
+      message: selected,
+      downloadToBlob,
+    }: {
+      message: typeof documentMessage;
+      downloadToBlob: boolean;
+    }) => {
+      expect(selected).toBe(documentMessage);
+      if (downloadToBlob) selected.payload.fileBlob = "blob:file:fallback";
+    };
+
+    const messageNode = new FixtureNode();
+    messageNode.id = messageId;
+    messageNode.attributes.set("data-message-type", "document");
+    Object.defineProperty(messageNode, "__reactFiber$fixture", {
+      value: {
+        memoizedProps: { message, loadAttachment },
+        return: null,
+      },
+    });
+    const documentEntry = new FixtureNode();
+    Object.defineProperty(documentEntry, "__reactFiber$fixture", {
+      value: {
+        elementType: { name: "MessageEntryDocument" },
+        memoizedProps: { message: documentMessage },
+        return: null,
+      },
+    });
+    messageNode.descendants = [documentEntry];
+    const documentFixture = {
+      getElementById: (id: string) => (id === messageId ? messageNode : null),
+    };
+    const result = Function(
+      "document",
+      `return (${buildDesktopAttachmentStartExpression(messageId)});`,
+    )(documentFixture) as string;
+    expect(result).toBe("started");
+    expect(filePayload.fileBlob).toBe("blob:file:fallback");
+  });
+
+  it.each([
+    {
+      label: "PDF from the nested payload",
+      suffix: "21",
+      fileName: "brief.pdf",
+      mimeType: "application/pdf",
+      blobMimeType: "application/pdf",
+      envelope: "payload",
+      loader: "onClick",
+    },
+    {
+      label: "DOCX from the live MessageEntryDocument shape",
+      suffix: "22",
+      fileName: "brief.docx",
+      mimeType:
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+      blobMimeType:
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+      envelope: "payload",
+      loader: "onClick",
+    },
+    {
+      label: "XLSX from the compatible file envelope",
+      suffix: "23",
+      fileName: "table.xlsx",
+      mimeType:
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      blobMimeType: "application/octet-stream",
+      envelope: "file",
+      loader: "loadAttachment",
+    },
+    {
+      label: "PPTX from a direct document payload",
+      suffix: "24",
+      fileName: "slides.pptx",
+      mimeType:
+        "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+      blobMimeType: "application/zip",
+      envelope: "direct",
+      loader: "onClick",
+    },
+  ] as const)(
+    "downloads $label through the same structural parser",
+    async ({ suffix, fileName, mimeType, blobMimeType, envelope, loader }) => {
+      class FixtureNode {
+        id = "";
+        innerText = "";
+        attributes = new Map<string, string>();
+        descendants: FixtureNode[] = [];
+
+        getAttribute(name: string) {
+          return this.attributes.get(name) ?? null;
+        }
+
+        closest(selector: string) {
+          return selector === ".chat-message-row--opponent" ? this : null;
+        }
+
+        querySelector(selector: string) {
+          if (selector === ".chat-message__text") {
+            return { innerText: this.innerText };
+          }
+          return null;
+        }
+
+        querySelectorAll(selector: string) {
+          return selector === "*" ? this.descendants : [];
+        }
+      }
+
+      const messageId = `00000000-0000-4000-8000-0000000000${suffix}`;
+      const senderId = "00000000-0000-4000-8000-000000000099";
+      const chatId = "00000000-0000-4000-8000-000000000088";
+      const bytes = new TextEncoder().encode(`document-${suffix}`);
+      const filePayload: {
+        type: string;
+        fileId: string;
+        fileName: string;
+        fileSize: number;
+        fileMimeType: string;
+        fileBlob?: string;
+      } = {
+        type: "document",
+        fileId: messageId,
+        fileName,
+        fileSize: bytes.length,
+        fileMimeType: mimeType,
+      };
+      const outerPayload =
+        envelope === "payload"
+          ? { type: "document", from: senderId, payload: filePayload }
+          : envelope === "file"
+            ? { type: "document", from: senderId, file: filePayload }
+            : filePayload;
+      const message = {
+        syncId: messageId,
+        sender: { userHuid: senderId },
+        payload: outerPayload,
+      };
+      const documentMessage = {
+        type: "document",
+        syncId: messageId,
+        msgId: messageId,
+        payload: filePayload,
+      };
+      const attachBlob = () => {
+        filePayload.fileBlob = `blob:file:${suffix}`;
+      };
+      const loadAttachment = ({
+        message: selected,
+        downloadToBlob,
+      }: {
+        message: typeof documentMessage;
+        downloadToBlob: boolean;
+      }) => {
+        expect(selected).toBe(documentMessage);
+        if (downloadToBlob) attachBlob();
+      };
+      const onClick = ({ downloadToBlob }: { downloadToBlob: boolean }) => {
+        if (downloadToBlob) attachBlob();
+      };
+
+      const messageNode = new FixtureNode();
+      messageNode.id = messageId;
+      messageNode.attributes.set("data-message-type", "document");
+      Object.defineProperty(messageNode, "__reactFiber$fixture", {
+        value: {
+          memoizedProps: { message, loadAttachment },
+          return: null,
+        },
+      });
+      const documentEntry = new FixtureNode();
+      Object.defineProperty(documentEntry, "__reactFiber$fixture", {
+        value: {
+          elementType: { name: "MessageEntryDocument" },
+          memoizedProps: {
+            message: documentMessage,
+            ...(loader === "onClick" ? { onClick } : {}),
+          },
+          return: null,
+        },
+      });
+      messageNode.descendants = [documentEntry];
+
+      const chatRoot = new FixtureNode();
+      Object.defineProperty(chatRoot, "__reactFiber$fixture", {
+        value: { memoizedProps: { groupChatId: chatId }, return: null },
+      });
+      const titleNode = new FixtureNode();
+      titleNode.innerText = "Approved chat";
+      const documentFixture = {
+        getElementById: (id: string) => (id === messageId ? messageNode : null),
+        querySelector: (selector: string) => {
+          if (selector === ".chat") return chatRoot;
+          if (selector === ".chat-header-title-container__text") {
+            return titleNode;
+          }
+          if (
+            selector === ".settings-button__avatar" ||
+            selector === '.slate-message-input[contenteditable="true"]'
+          ) {
+            return new FixtureNode();
+          }
+          return null;
+        },
+        querySelectorAll: (selector: string) =>
+          selector === ".chat-message-row--opponent .chat-message"
+            ? [messageNode]
+            : [],
+      };
+      const fetchFixture = (async (url: string | URL | Request) => {
+        expect(String(url)).toBe(`blob:file:${suffix}`);
+        return new Response(new Blob([bytes], { type: blobMimeType }));
+      }) as typeof fetch;
+      const run = <T>(expression: string) =>
+        Function(
+          "document",
+          "Node",
+          "fetch",
+          `return (${expression});`,
+        )(documentFixture, FixtureNode, fetchFixture) as T;
+
+      const snapshot = run<{
+        messages: Array<{
+          attachment: {
+            fileId: string;
+            fileName: string;
+            fileSize: number;
+            mimeType: string;
+          };
+        }>;
+      }>(buildDesktopSnapshotExpression());
+      expect(snapshot.messages[0]?.attachment).toEqual({
+        fileId: messageId,
+        fileName,
+        fileSize: bytes.length,
+        mimeType,
+        kind: "file",
+      });
+      expect(
+        run<string>(buildDesktopAttachmentStartExpression(messageId)),
+      ).toBe("started");
+      await expect(
+        run<Promise<{ ready: boolean; size: number; mimeType: string }>>(
+          buildDesktopAttachmentStatusExpression(messageId),
+        ),
+      ).resolves.toEqual({
+        ready: true,
+        size: bytes.length,
+        mimeType: blobMimeType,
+      });
+      const chunk = await run<Promise<{ base64: string; size: number }>>(
+        buildDesktopAttachmentChunkExpression(messageId, 0, bytes.length),
+      );
+      expect(Buffer.from(chunk.base64, "base64")).toEqual(Buffer.from(bytes));
+      expect(isDesktopAttachmentMimeCompatible(mimeType, blobMimeType)).toBe(
+        true,
+      );
+    },
+  );
+
+  it("accepts generic and ZIP blob MIME types for OpenXML documents", () => {
+    const docx =
+      "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+    expect(isDesktopAttachmentMimeCompatible(docx, docx)).toBe(true);
+    expect(
+      isDesktopAttachmentMimeCompatible(docx, "application/octet-stream"),
+    ).toBe(true);
+    expect(isDesktopAttachmentMimeCompatible(docx, "application/zip")).toBe(
+      true,
+    );
+    expect(isDesktopAttachmentMimeCompatible("application/pdf", null)).toBe(
+      true,
+    );
+    expect(
+      isDesktopAttachmentMimeCompatible("application/pdf", "application/zip"),
+    ).toBe(false);
+  });
+
+  it.each([
+    ["application/msword", "brief.doc"],
+    ["application/vnd.ms-excel", "table.xls"],
+    ["application/vnd.ms-powerpoint", "slides.ppt"],
+  ])("keeps legacy Office document MIME %s on the generic path", (mimeType) => {
+    expect(isDesktopAttachmentMimeCompatible(mimeType, mimeType)).toBe(true);
+    expect(
+      isDesktopAttachmentMimeCompatible(mimeType, "application/octet-stream"),
+    ).toBe(true);
+    expect(isDesktopAttachmentMimeCompatible(mimeType, "application/zip")).toBe(
+      false,
+    );
   });
 
   it("targets only the official client's exact attachment inputs", () => {
