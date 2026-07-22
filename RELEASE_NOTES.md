@@ -9,8 +9,9 @@ Desktop file transfer and fail-closed BotX hardening.
 - Receive desktop document, image, audio/voice and video attachments through the
   official client's verified `MessageEntryDocument.onClick` or
   `MessageEntry.loadAttachment` download-to-blob path. Client 3.68.44 stores the
-  attachment metadata at `message.payload.payload` and the resulting
-  `blob:file:` URL at `message.payload.fileBlob`.
+  attachment metadata and resulting `blob:file:` URL at
+  `message.payload.payload`; the former top-level blob path remains a
+  compatibility fallback.
 - Preserve file name, MIME type and OpenClaw media context while moving bounded
   blobs in 512 KiB chunks.
 - Send local files with OpenClaw `sendMedia` through the official client's exact

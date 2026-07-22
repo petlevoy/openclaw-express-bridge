@@ -23,6 +23,7 @@ import {
   DesktopDedupeStore,
   desktopInputSelectorFor,
   isDesktopOutboundUnlocked,
+  normalizeLoopbackCdpSocketUrl,
   normalizeLoopbackCdpUrl,
   validateDesktopOutboundFile,
 } from "./desktop-cdp.js";
@@ -35,6 +36,27 @@ describe("eXpress desktop CDP bridge", () => {
     expect(() => normalizeLoopbackCdpUrl("https://example.com:18997")).toThrow(
       /loopback/,
     );
+    expect(() =>
+      normalizeLoopbackCdpUrl("http://user:pass@127.0.0.1:18997"),
+    ).toThrow(/credentials/);
+    expect(
+      normalizeLoopbackCdpSocketUrl(
+        "ws://127.0.0.1:18997/devtools/page/abc",
+        "http://localhost:18997",
+      ),
+    ).toBe("ws://127.0.0.1:18997/devtools/page/abc");
+    expect(() =>
+      normalizeLoopbackCdpSocketUrl(
+        "ws://example.com:18997/devtools/page/abc",
+        "http://127.0.0.1:18997",
+      ),
+    ).toThrow(/loopback/);
+    expect(() =>
+      normalizeLoopbackCdpSocketUrl(
+        "ws://127.0.0.1:19999/devtools/page/abc",
+        "http://127.0.0.1:18997",
+      ),
+    ).toThrow(/protocol and port/);
   });
 
   it("builds a read-only snapshot expression for inbound messages", () => {
@@ -66,8 +88,10 @@ describe("eXpress desktop CDP bridge", () => {
       "found.loadAttachment({ message: found.message, downloadToBlob: true })",
     );
     expect(expressions).toContain("componentName === 'MessageEntryDocument'");
-    expect(expressions).toContain("found.message.payload?.fileBlob");
-    expect(expressions).not.toContain("payload?.payload?.fileBlob");
+    expect(expressions).toContain("found.message.payload?.payload?.fileBlob");
+    expect(expressions).toContain(
+      "found.message.payload?.payload?.fileBlob ?? found.message.payload?.fileBlob",
+    );
     expect(expressions).toContain("value.startsWith('blob:file:')");
     expect(expressions).toContain("blob.slice(0, 1024)");
     expect(expressions).not.toMatch(/cookie|authorization|bearer/i);

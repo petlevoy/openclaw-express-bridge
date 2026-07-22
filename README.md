@@ -131,7 +131,8 @@ bridge invokes `MessageEntryDocument.onClick({downloadToBlob: true})` for
 documents and the enclosing `MessageEntry.loadAttachment` handler for the other
 supported media types. It reads attachment metadata from
 `message.payload.payload`, waits for the downloaded blob at
-`message.payload.fileBlob`, and copies only a `Blob` or `blob:file:` URL into
+`message.payload.payload.fileBlob` (with a compatibility fallback to
+`message.payload.fileBlob`), and copies only a `Blob` or `blob:file:` URL into
 OpenClaw in bounded 512 KiB chunks. File UUID, sender UUID, name, size and MIME
 type are checked before and after the download. The saved path and media type
 are passed through OpenClaw's standard inbound media context.

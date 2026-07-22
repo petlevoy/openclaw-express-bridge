@@ -310,10 +310,35 @@ export function normalizeLoopbackCdpUrl(value: string): string {
   if (url.protocol !== "http:" && url.protocol !== "https:") {
     throw new Error("desktop CDP endpoint must use http or https");
   }
+  if (url.username || url.password) {
+    throw new Error("desktop CDP endpoint must not contain credentials");
+  }
   url.pathname = url.pathname.replace(/\/+$/, "");
   url.search = "";
   url.hash = "";
   return url.toString().replace(/\/$/, "");
+}
+
+export function normalizeLoopbackCdpSocketUrl(
+  value: string,
+  cdpUrl: string,
+): string {
+  const url = new URL(value);
+  const base = new URL(normalizeLoopbackCdpUrl(cdpUrl));
+  const hostname = url.hostname.toLowerCase();
+  if (!["127.0.0.1", "localhost", "[::1]", "::1"].includes(hostname)) {
+    throw new Error("desktop CDP websocket must use a loopback hostname");
+  }
+  const expectedProtocol = base.protocol === "https:" ? "wss:" : "ws:";
+  if (url.protocol !== expectedProtocol || url.port !== base.port) {
+    throw new Error(
+      "desktop CDP websocket must match the configured protocol and port",
+    );
+  }
+  if (url.username || url.password) {
+    throw new Error("desktop CDP websocket must not contain credentials");
+  }
+  return url.toString();
 }
 
 async function messageDataToText(data: unknown): Promise<string> {
@@ -602,7 +627,7 @@ export function buildDesktopAttachmentStartExpression(
   return `(() => {
     const found = ${lookup};
     if (!found) throw new Error('desktop attachment message is unavailable');
-    if (found.message.payload?.fileBlob) return 'ready';
+    if (found.message.payload?.payload?.fileBlob || found.message.payload?.fileBlob) return 'ready';
     if (found.type === 'document') {
       if (typeof found.documentOnClick !== 'function') throw new Error('desktop document attachment loader is unavailable');
       found.documentOnClick({ downloadToBlob: true });
@@ -619,7 +644,7 @@ function buildResolveAttachmentBlobSource(messageId: string): string {
   return `async () => {
     const found = ${lookup};
     if (!found) return null;
-    const value = found.message.payload?.fileBlob;
+    const value = found.message.payload?.payload?.fileBlob ?? found.message.payload?.fileBlob;
     if (value instanceof Blob) return value;
     if (typeof value === 'string' && value.startsWith('blob:file:')) {
       const response = await fetch(value, { credentials: 'omit', cache: 'no-store' });
@@ -688,6 +713,7 @@ export class ExpressDesktopClient {
   async connect(): Promise<void> {
     if (this.rpc) return;
     const response = await fetch(`${this.cdpUrl}/json/list`, {
+      redirect: "error",
       signal: AbortSignal.timeout(this.timeoutMs),
     });
     if (!response.ok)
@@ -703,10 +729,11 @@ export class ExpressDesktopClient {
     );
     if (!target?.webSocketDebuggerUrl)
       throw new Error("official eXpress desktop page target not found");
-    this.rpc = await CdpRpc.connect(
+    const socketUrl = normalizeLoopbackCdpSocketUrl(
       target.webSocketDebuggerUrl,
-      this.timeoutMs,
+      this.cdpUrl,
     );
+    this.rpc = await CdpRpc.connect(socketUrl, this.timeoutMs);
   }
 
   close(): void {
