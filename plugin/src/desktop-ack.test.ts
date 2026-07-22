@@ -128,11 +128,11 @@ describe("desktop inbound acknowledgement", () => {
       client,
       targetChatId: chatId,
       isUnlocked: async () => true,
-      keepaliveMs: 100,
+      keepaliveMs: 250,
     });
     expect(handle.kind).toBe("typing");
     expect(client.setTyping).toHaveBeenNthCalledWith(1, chatId, true);
-    await vi.advanceTimersByTimeAsync(100);
+    await vi.advanceTimersByTimeAsync(250);
     expect(client.setTyping).toHaveBeenNthCalledWith(2, chatId, true);
     await handle.stop();
     expect(client.setTyping).toHaveBeenLastCalledWith(chatId, false);
@@ -212,5 +212,28 @@ describe("desktop inbound acknowledgement", () => {
     expect(handle.kind).toBe("none");
     expect(client.setTyping).not.toHaveBeenCalled();
     expect(client.sendText).not.toHaveBeenCalled();
+  });
+
+  it("re-checks the interlock after a durable claim before typing", async () => {
+    const client = {
+      sendText: vi.fn(),
+      setTyping: vi.fn(),
+    };
+    const isUnlocked = vi
+      .fn<() => Promise<boolean>>()
+      .mockResolvedValueOnce(true)
+      .mockResolvedValueOnce(false);
+    const claim = vi.fn().mockResolvedValue(true);
+    const handle = await startDesktopInboundAcknowledgement({
+      account: account("typing"),
+      client,
+      targetChatId: chatId,
+      claim,
+      isUnlocked,
+    });
+    expect(handle.kind).toBe("none");
+    expect(claim).toHaveBeenCalledOnce();
+    expect(isUnlocked).toHaveBeenCalledTimes(2);
+    expect(client.setTyping).not.toHaveBeenCalled();
   });
 });

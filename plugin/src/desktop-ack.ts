@@ -102,6 +102,7 @@ export async function startDesktopInboundAcknowledgement(
   }
 
   try {
+    if (!(await isUnlocked())) return NO_ACK;
     await options.client.setTyping(options.targetChatId, true);
     options.onActivity?.("typing");
   } catch (error) {
