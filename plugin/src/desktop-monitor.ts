@@ -20,11 +20,76 @@ import {
 import {
   DesktopDispatchRateLimiter,
   redactDesktopError,
-  selectDesktopInboundBatch,
+  selectDesktopInboundBatchResilient,
 } from "./desktop-safety.js";
 import { toPlainText } from "./format.js";
 import type { ExpressMonitorOptions } from "./monitor.js";
 import { getExpressRuntime } from "./runtime.js";
+
+export const DESKTOP_INBOUND_EVENT_MAX_ATTEMPTS = 3;
+
+export class DesktopInboundAttachmentError extends Error {
+  constructor(readonly detail: unknown) {
+    super("desktop inbound attachment processing failed");
+    this.name = "DesktopInboundAttachmentError";
+  }
+}
+
+export type DesktopInboundEventOutcome = "delivered" | "retry" | "quarantined";
+
+interface ProcessDesktopInboundEventOptions {
+  message: DesktopMessage;
+  store: DesktopDedupeStore;
+  work: () => Promise<void>;
+  maxAttempts?: number;
+  onDiagnostic?: (
+    outcome: Exclude<DesktopInboundEventOutcome, "delivered">,
+    attempt: number,
+    diagnostic: string,
+  ) => void;
+}
+
+/**
+ * Isolate a poison attachment from the CDP connection. Attachment failures
+ * receive a bounded durable retry and then only that message id is skipped.
+ * Transport or OpenClaw dispatch failures still escape to the reconnect path.
+ */
+export async function processDesktopInboundEvent(
+  options: ProcessDesktopInboundEventOptions,
+): Promise<DesktopInboundEventOutcome> {
+  try {
+    await options.work();
+    await options.store.add(options.message.id);
+    return "delivered";
+  } catch (error) {
+    if (!(error instanceof DesktopInboundAttachmentError)) throw error;
+    const disposition = await options.store.recordFailure(
+      options.message.id,
+      options.maxAttempts ?? DESKTOP_INBOUND_EVENT_MAX_ATTEMPTS,
+    );
+    const outcome = disposition.quarantined ? "quarantined" : "retry";
+    options.onDiagnostic?.(
+      outcome,
+      disposition.attempt,
+      redactDesktopError(error.detail),
+    );
+    return outcome;
+  }
+}
+
+function isDesktopTransportFailure(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return (
+    /^desktop CDP (?:connection|websocket|target list|command timed out)/.test(
+      message,
+    ) ||
+    /^desktop CDP [A-Za-z.]+ failed:/.test(message) ||
+    message === "official eXpress desktop page target not found" ||
+    message === "official eXpress desktop client is not authenticated" ||
+    message === "active desktop chat UUID is not allowlisted" ||
+    message === "active desktop chat title is not allowlisted"
+  );
+}
 
 function sleepWithAbort(
   milliseconds: number,
@@ -112,7 +177,7 @@ export async function startExpressDesktopMonitor(
             `[${account.accountId}] eXpress desktop baseline recorded (${snapshot.messages.length} visible inbound ids)`,
           );
         } else {
-          const queued = selectDesktopInboundBatch(
+          const batch = selectDesktopInboundBatchResilient(
             snapshot.messages,
             (messageId) => store.has(messageId),
             {
@@ -124,7 +189,27 @@ export async function startExpressDesktopMonitor(
               ),
             },
           );
-          for (const message of queued) {
+          const onDiagnostic = (
+            message: DesktopMessage,
+            outcome: Exclude<DesktopInboundEventOutcome, "delivered">,
+            attempt: number,
+            diagnostic: string,
+          ) =>
+            log?.warn?.(
+              `[${account.accountId}] eXpress desktop inbound ${outcome} id=${message.id} type=${message.type} attempt=${attempt}/${DESKTOP_INBOUND_EVENT_MAX_ATTEMPTS}: ${diagnostic}`,
+            );
+          for (const rejected of batch.rejected) {
+            await processDesktopInboundEvent({
+              message: rejected.message,
+              store,
+              work: async () => {
+                throw new DesktopInboundAttachmentError(rejected.error);
+              },
+              onDiagnostic: (outcome, attempt, diagnostic) =>
+                onDiagnostic(rejected.message, outcome, attempt, diagnostic),
+            });
+          }
+          for (const message of batch.queued) {
             if (abortSignal.aborted) break;
             await withDesktopInboundAcknowledgement(
               {
@@ -141,17 +226,21 @@ export async function startExpressDesktopMonitor(
               async (acknowledgement) => {
                 await sleepWithAbort(rateLimiter.reserve(), abortSignal);
                 if (abortSignal.aborted) return;
-                await dispatchDesktopInbound(
-                  opts,
+                await processDesktopInboundEvent({
                   message,
-                  client,
-                  acknowledgement,
-                );
+                  store,
+                  work: () =>
+                    dispatchDesktopInbound(
+                      opts,
+                      message,
+                      client,
+                      acknowledgement,
+                    ),
+                  onDiagnostic: (outcome, attempt, diagnostic) =>
+                    onDiagnostic(message, outcome, attempt, diagnostic),
+                });
               },
             );
-            if (!abortSignal.aborted) {
-              await store.add(message.id);
-            }
           }
         }
         await sleepWithAbort(pollIntervalMs, abortSignal);
@@ -194,17 +283,25 @@ async function dispatchDesktopInbound(
   const mediaTypes: string[] = [];
   let attachmentText = "";
   if (message.attachment) {
-    const downloaded = await client.downloadAttachment(message, maxMediaBytes);
-    const saved = await core.channel.media.saveMediaBuffer(
-      downloaded.buffer,
-      downloaded.mimeType,
-      "inbound",
-      maxMediaBytes,
-      downloaded.fileName,
-    );
-    mediaPaths.push(saved.path);
-    mediaTypes.push(downloaded.mimeType);
-    attachmentText = `[File: ${downloaded.fileName}]`;
+    try {
+      const downloaded = await client.downloadAttachment(
+        message,
+        maxMediaBytes,
+      );
+      const saved = await core.channel.media.saveMediaBuffer(
+        downloaded.buffer,
+        downloaded.mimeType,
+        "inbound",
+        maxMediaBytes,
+        downloaded.fileName,
+      );
+      mediaPaths.push(saved.path);
+      mediaTypes.push(downloaded.mimeType);
+      attachmentText = `[File: ${downloaded.fileName}]`;
+    } catch (error) {
+      if (isDesktopTransportFailure(error)) throw error;
+      throw new DesktopInboundAttachmentError(error);
+    }
   }
   if (!text && mediaPaths.length === 0) return;
 

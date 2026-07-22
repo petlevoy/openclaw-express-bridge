@@ -139,9 +139,9 @@ describe("eXpress desktop CDP bridge", () => {
       "found.loadAttachment({ message: found.attachmentMessage, downloadToBlob: true })",
     );
     expect(expressions).toContain("componentName === 'MessageEntryDocument'");
-    expect(expressions).toContain("found.message?.payload?.payload?.fileBlob");
+    expect(expressions).toContain("found.attachmentMessages");
     expect(expressions).toContain("attachmentBlobCandidates(found)");
-    expect(expressions).toContain("found.attachmentMessage?.payload?.fileBlob");
+    expect(expressions).toContain("message?.payload?.fileBlob");
     expect(expressions).toContain("value.startsWith('blob:file:')");
     expect(expressions).toContain("blob.slice(0, 1024)");
     expect(expressions).not.toMatch(/cookie|authorization|bearer/i);
@@ -446,6 +446,33 @@ describe("eXpress desktop CDP bridge", () => {
       envelope: "direct",
       loader: "onClick",
     },
+    {
+      label: "legacy DOC",
+      suffix: "25",
+      fileName: "brief.doc",
+      mimeType: "application/msword",
+      blobMimeType: "application/msword",
+      envelope: "payload",
+      loader: "loadAttachment",
+    },
+    {
+      label: "legacy XLS",
+      suffix: "26",
+      fileName: "table.xls",
+      mimeType: "application/vnd.ms-excel",
+      blobMimeType: "application/octet-stream",
+      envelope: "payload",
+      loader: "loadAttachment",
+    },
+    {
+      label: "legacy PPT",
+      suffix: "27",
+      fileName: "slides.ppt",
+      mimeType: "application/vnd.ms-powerpoint",
+      blobMimeType: "application/vnd.ms-powerpoint",
+      envelope: "payload",
+      loader: "loadAttachment",
+    },
   ] as const)(
     "downloads $label through the same structural parser",
     async ({ suffix, fileName, mimeType, blobMimeType, envelope, loader }) => {
@@ -626,6 +653,220 @@ describe("eXpress desktop CDP bridge", () => {
     },
   );
 
+  it.each([
+    {
+      label: "image",
+      suffix: "31",
+      type: "image",
+      fileName: "photo.jpg",
+      mimeType: "image/jpeg",
+      kind: "image",
+    },
+    {
+      label: "audio",
+      suffix: "32",
+      type: "audio",
+      fileName: "clip.m4a",
+      mimeType: "audio/mp4",
+      kind: "audio",
+    },
+    {
+      label: "voice",
+      suffix: "33",
+      type: "voice",
+      fileName: "voice.m4a",
+      mimeType: "audio/mp4",
+      kind: "audio",
+    },
+    {
+      label: "video",
+      suffix: "34",
+      type: "video",
+      fileName: "clip.mp4",
+      mimeType: "video/mp4",
+      kind: "video",
+    },
+  ] as const)(
+    "downloads $label through the exact descendant loader from the live client shape",
+    async ({ suffix, type, fileName, mimeType, kind }) => {
+      class FixtureNode {
+        id = "";
+        innerText = "";
+        attributes = new Map<string, string>();
+        descendants: FixtureNode[] = [];
+
+        getAttribute(name: string) {
+          return this.attributes.get(name) ?? null;
+        }
+
+        closest(selector: string) {
+          return selector === ".chat-message-row--opponent" ? this : null;
+        }
+
+        querySelector(selector: string) {
+          if (selector === ".chat-message__text") {
+            return { innerText: this.innerText };
+          }
+          return null;
+        }
+
+        querySelectorAll(selector: string) {
+          return selector === "*" ? this.descendants : [];
+        }
+      }
+
+      const messageId = `00000000-0000-4000-8000-0000000000${suffix}`;
+      const senderId = "00000000-0000-4000-8000-000000000099";
+      const chatId = "00000000-0000-4000-8000-000000000088";
+      const bytes = new TextEncoder().encode(`${type}-${suffix}`);
+      const filePayload: {
+        type: string;
+        fileId: string;
+        fileName: string;
+        fileSize: number;
+        fileMimeType: string;
+        fileBlob?: string;
+      } = {
+        type,
+        fileId: messageId,
+        fileName,
+        fileSize: bytes.length,
+        fileMimeType: mimeType,
+      };
+      const envelopeFilePayload = {
+        ...filePayload,
+        ...(type === "voice" ? { fileBlob: "blob:file:stale-envelope" } : {}),
+      };
+      const envelopeMessage = {
+        syncId: messageId,
+        sender: { userHuid: senderId },
+        payload: {
+          type,
+          msgId: messageId,
+          from: senderId,
+          payload: envelopeFilePayload,
+        },
+      };
+      const attachmentMessage = {
+        type,
+        syncId: messageId,
+        msgId: messageId,
+        payload: filePayload,
+      };
+      const loadedMessages: unknown[] = [];
+      const exactLoader = ({
+        message,
+        downloadToBlob,
+      }: {
+        message: typeof attachmentMessage;
+        downloadToBlob: boolean;
+      }) => {
+        loadedMessages.push(message);
+        if (downloadToBlob) filePayload.fileBlob = `blob:file:${suffix}`;
+      };
+      const wrongEnvelopeLoader = ({ message }: { message: unknown }) => {
+        throw new Error(`wrong envelope loader selected: ${String(message)}`);
+      };
+
+      const messageNode = new FixtureNode();
+      messageNode.id = messageId;
+      messageNode.attributes.set("data-message-type", type);
+      Object.defineProperty(messageNode, "__reactFiber$fixture", {
+        value: {
+          memoizedProps: {
+            message: envelopeMessage,
+            loadAttachment: wrongEnvelopeLoader,
+          },
+          return: null,
+        },
+      });
+      const attachmentEntry = new FixtureNode();
+      Object.defineProperty(attachmentEntry, "__reactFiber$fixture", {
+        value: {
+          elementType: { name: "MessageEntryBody" },
+          memoizedProps: {
+            message: attachmentMessage,
+            loadAttachment: exactLoader,
+          },
+          return: null,
+        },
+      });
+      const typedEntry = new FixtureNode();
+      Object.defineProperty(typedEntry, "__reactFiber$fixture", {
+        value: {
+          elementType: {
+            name: `MessageEntry${type[0]?.toUpperCase()}${type.slice(1)}`,
+          },
+          memoizedProps: { message: attachmentMessage },
+          return: null,
+        },
+      });
+      messageNode.descendants = [typedEntry, attachmentEntry];
+
+      const chatRoot = new FixtureNode();
+      Object.defineProperty(chatRoot, "__reactFiber$fixture", {
+        value: { memoizedProps: { groupChatId: chatId }, return: null },
+      });
+      const titleNode = new FixtureNode();
+      titleNode.innerText = "Approved chat";
+      const documentFixture = {
+        getElementById: (id: string) => (id === messageId ? messageNode : null),
+        querySelector: (selector: string) => {
+          if (selector === ".chat") return chatRoot;
+          if (selector === ".chat-header-title-container__text") {
+            return titleNode;
+          }
+          if (
+            selector === ".settings-button__avatar" ||
+            selector === '.slate-message-input[contenteditable="true"]'
+          ) {
+            return new FixtureNode();
+          }
+          return null;
+        },
+        querySelectorAll: (selector: string) =>
+          selector === ".chat-message-row--opponent .chat-message"
+            ? [messageNode]
+            : [],
+      };
+      const fetchFixture = (async (url: string | URL | Request) => {
+        expect(String(url)).toBe(`blob:file:${suffix}`);
+        return new Response(new Blob([bytes], { type: mimeType }));
+      }) as typeof fetch;
+      const run = <T>(expression: string) =>
+        Function(
+          "document",
+          "Node",
+          "fetch",
+          `return (${expression});`,
+        )(documentFixture, FixtureNode, fetchFixture) as T;
+
+      const snapshot = run<{
+        messages: Array<{
+          type: string;
+          attachment: { kind: string; mimeType: string };
+        }>;
+      }>(buildDesktopSnapshotExpression());
+      expect(snapshot.messages[0]).toMatchObject({
+        type,
+        attachment: { kind, mimeType },
+      });
+      expect(
+        run<string>(buildDesktopAttachmentStartExpression(messageId)),
+      ).toBe("started");
+      expect(loadedMessages).toEqual([attachmentMessage]);
+      await expect(
+        run<Promise<{ ready: boolean; size: number; mimeType: string }>>(
+          buildDesktopAttachmentStatusExpression(messageId),
+        ),
+      ).resolves.toEqual({
+        ready: true,
+        size: bytes.length,
+        mimeType,
+      });
+    },
+  );
+
   it("accepts generic and ZIP blob MIME types for OpenXML documents", () => {
     const docx =
       "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
@@ -642,6 +883,18 @@ describe("eXpress desktop CDP bridge", () => {
     expect(
       isDesktopAttachmentMimeCompatible("application/pdf", "application/zip"),
     ).toBe(false);
+  });
+
+  it("accepts safe media MIME aliases within the same major type", () => {
+    expect(isDesktopAttachmentMimeCompatible("audio/m4a", "audio/mp4")).toBe(
+      true,
+    );
+    expect(isDesktopAttachmentMimeCompatible("image/jpeg", "image/png")).toBe(
+      true,
+    );
+    expect(isDesktopAttachmentMimeCompatible("audio/m4a", "video/mp4")).toBe(
+      false,
+    );
   });
 
   it.each([
@@ -850,6 +1103,48 @@ describe("eXpress desktop CDP bridge", () => {
     expect(await third.load()).toBe(true);
     expect(third.has("message-one")).toBe(true);
     expect(third.hasAcknowledged("message-one")).toBe(false);
+  });
+
+  it("durably retries one failed event and quarantines only that id", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "express-retry-test-"));
+    const statePath = join(directory, "state.json");
+    const first = new DesktopDedupeStore(statePath, 10);
+    expect(await first.load()).toBe(false);
+    expect(await first.claimAcknowledgement("poison-one")).toBe(true);
+    await expect(first.recordFailure("poison-one", 3)).resolves.toEqual({
+      attempt: 1,
+      quarantined: false,
+    });
+    expect(first.has("poison-one")).toBe(false);
+    expect(first.hasAcknowledged("poison-one")).toBe(true);
+
+    const second = new DesktopDedupeStore(statePath, 10);
+    expect(await second.load()).toBe(true);
+    await expect(second.recordFailure("poison-one", 3)).resolves.toEqual({
+      attempt: 2,
+      quarantined: false,
+    });
+    await expect(second.recordFailure("poison-one", 3)).resolves.toEqual({
+      attempt: 3,
+      quarantined: true,
+    });
+    expect(second.has("poison-one")).toBe(true);
+    expect(second.hasAcknowledged("poison-one")).toBe(false);
+    expect(await second.claimAcknowledgement("poison-one")).toBe(false);
+
+    await second.add("healthy-two");
+    const raw = JSON.parse(await readFile(statePath, "utf8")) as {
+      version: number;
+      seen: string[];
+      failures: Record<string, number>;
+      quarantined: string[];
+    };
+    expect(raw).toMatchObject({
+      version: 4,
+      seen: ["healthy-two"],
+      failures: {},
+      quarantined: ["poison-one"],
+    });
   });
 
   it("loads the previous dedupe format without replaying visible messages", async () => {

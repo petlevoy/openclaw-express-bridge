@@ -1,6 +1,6 @@
 {
   "name": "openclaw-express",
-  "version": "2.2.3",
+  "version": "2.2.4",
   "description": "eXpress channel for OpenClaw — BotX or official Linux desktop bridge",
   "license": "MIT",
   "type": "module",

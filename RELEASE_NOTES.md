@@ -1,5 +1,22 @@
 # Release notes
 
+## 1.1.4
+
+- Ships plugin 2.2.4 with the live eXpress 3.68.44 attachment shape fixed for
+  images and audio/voice: the downloadable message and `loadAttachment` handler
+  live together on the nested `MessageEntryBody`, not on the outer envelope.
+- Uses that exact nested official-client loader as the primary path for
+  documents, images, audio/voice and video; document `onClick` remains a
+  compatibility fallback.
+- Isolates attachment failures per message. A failed event receives three
+  durable attempts, then only its ID is quarantined; later messages continue
+  without closing CDP or entering a reconnect/replay loop.
+- Preserves global reconnect behavior for CDP transport, authentication and
+  active-chat allowlist failures.
+- Keeps immediate native typing/text fallback acknowledgements deduplicated and
+  ahead of attachment download and OpenClaw processing.
+- No live outbound canary or public release was performed for this patch.
+
 ## 1.1.3
 
 - Ships plugin 2.2.3 with opt-in immediate desktop acknowledgement after exact

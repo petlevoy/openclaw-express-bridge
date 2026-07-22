@@ -2,8 +2,10 @@ import { describe, expect, it } from "vitest";
 
 import {
   DesktopDispatchRateLimiter,
+  isDesktopAttachmentMetadataCompatible,
   redactDesktopError,
   selectDesktopInboundBatch,
+  selectDesktopInboundBatchResilient,
 } from "./desktop-safety.js";
 
 const id = (suffix: string) =>
@@ -122,6 +124,87 @@ describe("eXpress desktop safety controls", () => {
         limits,
       ),
     ).toThrow(/kind is inconsistent/);
+  });
+
+  it("isolates one malformed attachment and keeps the later event queued", () => {
+    const poison = {
+      id: id("7"),
+      senderId,
+      type: "voice" as const,
+      text: "",
+      attachment: {
+        fileId: id("7"),
+        fileName: "../voice.m4a",
+        fileSize: 512,
+        mimeType: "audio/m4a",
+        kind: "audio" as const,
+      },
+    };
+    const healthy = textMessage("8", "later");
+    const batch = selectDesktopInboundBatchResilient(
+      [poison, healthy],
+      () => false,
+      limits,
+    );
+    expect(batch.queued).toEqual([healthy]);
+    expect(batch.rejected).toHaveLength(1);
+    expect(batch.rejected[0]?.message.id).toBe(poison.id);
+    expect(batch.rejected[0]?.error).toEqual(
+      expect.objectContaining({ message: expect.stringMatching(/unsafe/) }),
+    );
+  });
+
+  it.each([
+    ["document", "brief.doc", "application/msword"],
+    [
+      "document",
+      "brief.docx",
+      "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    ],
+    ["document", "brief.pdf", "application/pdf"],
+    ["document", "table.xls", "application/vnd.ms-excel"],
+    [
+      "document",
+      "table.xlsx",
+      "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    ],
+    ["document", "slides.ppt", "application/vnd.ms-powerpoint"],
+    [
+      "document",
+      "slides.pptx",
+      "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    ],
+    ["image", "photo.jpg", "image/jpeg"],
+    ["audio", "clip.m4a", "audio/mp4"],
+    ["voice", "voice.m4a", "audio/m4a"],
+    ["video", "clip.mp4", "video/mp4"],
+  ] as const)(
+    "validates the allowlisted %s parser for %s",
+    (type, name, mime) => {
+      expect(isDesktopAttachmentMetadataCompatible(type, name, mime)).toBe(
+        true,
+      );
+    },
+  );
+
+  it("rejects unsupported document and cross-media metadata", () => {
+    expect(
+      isDesktopAttachmentMetadataCompatible(
+        "document",
+        "payload.exe",
+        "application/octet-stream",
+      ),
+    ).toBe(false);
+    expect(
+      isDesktopAttachmentMetadataCompatible("voice", "voice.m4a", "video/mp4"),
+    ).toBe(false);
+    expect(
+      isDesktopAttachmentMetadataCompatible(
+        "voice",
+        "payload.docx",
+        "application/octet-stream",
+      ),
+    ).toBe(false);
   });
 
   it("reserves sequential rate-limited dispatch slots", () => {

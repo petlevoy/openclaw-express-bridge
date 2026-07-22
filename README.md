@@ -1,4 +1,4 @@
-# openclaw-express-bridge 1.1.3
+# openclaw-express-bridge 1.1.4
 
 An installable, fail-closed bridge between OpenClaw and the official eXpress
 Linux desktop client. It runs the client headlessly on an isolated Xvfb display,
@@ -39,7 +39,7 @@ grant was found in the client payload.
 Debian package:
 
 ```bash
-sudo apt install ./openclaw-express-bridge_1.1.3_amd64.deb
+sudo apt install ./openclaw-express-bridge_1.1.4_amd64.deb
 openclaw-express-bridge install
 openclaw-express-bridge install-client
 ```
@@ -47,8 +47,8 @@ openclaw-express-bridge install-client
 Portable archive:
 
 ```bash
-tar -xzf openclaw-express-bridge-1.1.3-linux-amd64.tar.gz
-cd openclaw-express-bridge-1.1.3
+tar -xzf openclaw-express-bridge-1.1.4-linux-amd64.tar.gz
+cd openclaw-express-bridge-1.1.4
 ./install.sh
 ~/.local/bin/openclaw-express-bridge install-client
 ```
@@ -144,16 +144,24 @@ never reach the acknowledgement path.
 
 Desktop inbound supports document, image, audio/voice and video entries when the
 official client exposes complete, valid file metadata. For client 3.68.44 the
-bridge invokes `MessageEntryDocument.onClick({downloadToBlob: true})` for
-documents, with the enclosing `MessageEntry.loadAttachment` handler as an
-official-client fallback and for the other supported media types. It reads
+bridge resolves the exact nested attachment message and invokes its official
+`MessageEntryBody.loadAttachment({message, downloadToBlob: true})` handler for
+documents, images, audio/voice and video. `MessageEntryDocument.onClick` remains
+a document-only compatibility fallback. It reads
 attachment metadata from `message.payload.payload` or the client's compatible
 file envelope, resolves only verified nested/direct blob fields, and copies only
-a `Blob` or `blob:file:` URL into OpenClaw in bounded 512 KiB chunks. Conflicting
-blob fields fail closed. File UUID, sender UUID, name, size and MIME type are
-checked before and after the download; generic Electron blob types are accepted
-only for compatible OpenXML containers. The saved path and declared media type
-are passed through OpenClaw's standard inbound media context.
+a `Blob` or `blob:file:` URL from the canonical nested message into OpenClaw in
+bounded 512 KiB chunks. Stale outer-envelope blobs are ignored whenever the
+exact nested message is present. File UUID, sender UUID, name, size and MIME type
+are checked before and after the download; generic Electron blob types are
+accepted only when the declared file metadata is allowlisted and compatible.
+The saved path and declared media type are passed through OpenClaw's standard
+inbound media context.
+
+A failed attachment is retried three times with a durable per-message counter.
+If it remains unreadable, only that exact message ID is quarantined; later
+messages continue and the CDP channel is not reconnected in a loop. Transport
+and active-chat failures still use the channel reconnect path.
 
 Desktop outbound `sendMedia` accepts only a local regular, non-symlink file. The
 default allowed root is `~/.openclaw/media`; additional exact roots require the
@@ -183,7 +191,7 @@ streaming. Non-loopback CTS endpoints must use HTTPS.
 
 ## PDF scope matrix
 
-| Requirement | 1.1.3 state |
+| Requirement | 1.1.4 state |
 |---|---|
 | Native OpenClaw channel lifecycle | Implemented |
 | Default/named account configuration | Implemented; concurrent desktop accounts require separate client/CDP sessions |
@@ -266,7 +274,7 @@ Please report suspected vulnerabilities privately as described in
   plugin update after a client upgrade.
 - The public build pins one verified client release; a newer release requires a
   reviewed URL and SHA-256 update in `client.env`.
-- Only Linux amd64 and one exact direct chat are covered by the 1.1.3 bootstrap.
+- Only Linux amd64 and one exact direct chat are covered by the 1.1.4 bootstrap.
 - No live eXpress file was sent by the automated test suite; the desktop file
   contract is covered by unit tests and must be canary-tested in an approved chat.
 - BotX inbound, shared-listener routing, reactions and chat/thread creation are

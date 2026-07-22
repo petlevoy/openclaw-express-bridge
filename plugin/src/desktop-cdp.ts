@@ -120,10 +120,17 @@ export const DESKTOP_VIDEO_INPUT_SELECTOR =
 export const DESKTOP_TYPING_FAILSAFE_MS = 8_000;
 
 interface DedupeState {
-  version: 2 | 3;
+  version: 2 | 3 | 4;
   seen: string[];
   acknowledged?: string[];
+  failures?: Record<string, number>;
+  quarantined?: string[];
   updatedAt: string;
+}
+
+export interface DesktopFailureDisposition {
+  attempt: number;
+  quarantined: boolean;
 }
 
 function resolveUserPath(value: string): string {
@@ -644,15 +651,28 @@ function buildAttachmentLookupExpression(messageId: string): string {
     const fiberKey = Object.getOwnPropertyNames(node).find((key) => key.startsWith('__reactFiber$'));
     let fiber = fiberKey ? node[fiberKey] : null;
     let message = null;
-    let loadAttachment = null;
+    const messages = [];
+    let envelopeLoadAttachment = null;
+    let attachmentLoadAttachment = null;
     let attachmentMessage = null;
+    const attachmentMessages = [];
+    const addUnique = (values, value) => {
+      if (value && !values.includes(value)) values.push(value);
+    };
     for (let index = 0; fiber && index < 30; index += 1, fiber = fiber.return) {
       const props = fiber.memoizedProps;
       if (props?.message?.syncId === expected) {
         message ||= props.message;
-        if (props.message?.msgId === expected) attachmentMessage ||= props.message;
+        addUnique(messages, props.message);
+        if (props.message?.msgId === expected) {
+          attachmentMessage ||= props.message;
+          addUnique(attachmentMessages, props.message);
+          if (typeof props.loadAttachment === 'function') {
+            attachmentLoadAttachment ||= props.loadAttachment;
+          }
+        }
         if (typeof props.loadAttachment === 'function') {
-          loadAttachment ||= props.loadAttachment;
+          envelopeLoadAttachment ||= props.loadAttachment;
         }
       }
     }
@@ -671,36 +691,63 @@ function buildAttachmentLookupExpression(messageId: string): string {
           '',
         );
         if (
+          props?.message?.syncId === expected &&
+          props.message?.msgId === expected
+        ) {
+          attachmentMessage ||= props.message;
+          addUnique(messages, props.message);
+          addUnique(attachmentMessages, props.message);
+          if (typeof props.loadAttachment === 'function') {
+            attachmentLoadAttachment ||= props.loadAttachment;
+          }
+        }
+        if (
           componentName === 'MessageEntryDocument' &&
           props?.message?.syncId === expected &&
           props.message?.msgId === expected
         ) {
           attachmentMessage ||= props.message;
+          addUnique(messages, props.message);
+          addUnique(attachmentMessages, props.message);
           if (typeof props.onClick === 'function') {
-            documentOnClick = props.onClick;
-            break;
+            documentOnClick ||= props.onClick;
           }
         }
       }
-      if (documentOnClick) break;
     }
     return message
-      ? { message, attachmentMessage, type: node.getAttribute('data-message-type'), loadAttachment, documentOnClick }
+      ? {
+          message,
+          messages,
+          attachmentMessage,
+          attachmentMessages,
+          type: node.getAttribute('data-message-type'),
+          loadAttachment: attachmentLoadAttachment || envelopeLoadAttachment,
+          documentOnClick,
+        }
       : null;
   })()`;
 }
 
 function buildAttachmentBlobCandidatesSource(): string {
   return `function attachmentBlobCandidates(found) {
-    return [
-      found.message?.payload?.payload?.fileBlob,
-      found.message?.payload?.file?.fileBlob,
-      found.message?.payload?.fileBlob,
-      found.message?.fileBlob,
-      found.attachmentMessage?.payload?.fileBlob,
-      found.attachmentMessage?.payload?.payload?.fileBlob,
-      found.attachmentMessage?.fileBlob,
-    ].filter((value) => value != null);
+    const exactMessages = [
+      ...(Array.isArray(found.attachmentMessages) ? found.attachmentMessages : []),
+      found.attachmentMessage,
+    ].filter(Boolean);
+    const messages = exactMessages.length > 0
+      ? exactMessages
+      : [...(Array.isArray(found.messages) ? found.messages : []), found.message].filter(Boolean);
+    const candidates = [];
+    for (const message of messages) {
+      candidates.push(
+        message?.payload?.payload?.fileBlob,
+        message?.payload?.file?.fileBlob,
+        message?.payload?.fileBlob,
+        message?.fileBlob,
+      );
+    }
+    return candidates.filter((value) => value != null);
   }`;
 }
 
@@ -714,17 +761,12 @@ export function buildDesktopAttachmentStartExpression(
     if (!found) throw new Error('desktop attachment message is unavailable');
     ${blobCandidates}
     if (attachmentBlobCandidates(found).length > 0) return 'ready';
-    if (found.type === 'document') {
-      if (typeof found.documentOnClick === 'function') {
-        found.documentOnClick({ downloadToBlob: true });
-      } else if (typeof found.loadAttachment === 'function' && found.attachmentMessage) {
-        found.loadAttachment({ message: found.attachmentMessage, downloadToBlob: true });
-      } else {
-        throw new Error('desktop document attachment loader is unavailable');
-      }
+    if (typeof found.loadAttachment === 'function' && found.attachmentMessage) {
+      found.loadAttachment({ message: found.attachmentMessage, downloadToBlob: true });
+    } else if (found.type === 'document' && typeof found.documentOnClick === 'function') {
+      found.documentOnClick({ downloadToBlob: true });
     } else {
-      if (typeof found.loadAttachment !== 'function') throw new Error('desktop attachment loader is unavailable');
-      found.loadAttachment({ message: found.attachmentMessage || found.message, downloadToBlob: true });
+      throw new Error('desktop exact attachment loader is unavailable');
     }
     return 'started';
   })()`;
@@ -739,9 +781,6 @@ function buildResolveAttachmentBlobSource(messageId: string): string {
     ${blobCandidates}
     const candidates = attachmentBlobCandidates(found);
     const value = candidates[0];
-    if (candidates.some((candidate) => candidate !== value)) {
-      throw new Error('desktop attachment blob source is ambiguous');
-    }
     if (value instanceof Blob) return value;
     if (typeof value === 'string' && value.startsWith('blob:file:')) {
       const response = await fetch(value, { credentials: 'omit', cache: 'no-store' });
@@ -796,6 +835,13 @@ export function isDesktopAttachmentMimeCompatible(
   const declared = declaredMimeType.trim().toLowerCase();
   const actual = blobMimeType?.trim().toLowerCase() ?? "";
   if (!actual || actual === declared || actual === "application/octet-stream") {
+    return true;
+  }
+  if (
+    (declared.startsWith("image/") && actual.startsWith("image/")) ||
+    (declared.startsWith("audio/") && actual.startsWith("audio/")) ||
+    (declared.startsWith("video/") && actual.startsWith("video/"))
+  ) {
     return true;
   }
   const openXmlTypes = new Set([
@@ -1167,6 +1213,8 @@ export class ExpressDesktopClient {
 export class DesktopDedupeStore {
   private readonly seen = new Set<string>();
   private readonly acknowledged = new Set<string>();
+  private readonly failures = new Map<string, number>();
+  private readonly quarantined = new Set<string>();
   private loaded = false;
 
   constructor(
@@ -1181,11 +1229,34 @@ export class DesktopDedupeStore {
       const state = JSON.parse(
         await readFile(resolveUserPath(this.statePath), "utf8"),
       ) as DedupeState;
-      if (state.version !== 2 && state.version !== 3) return false;
+      if (state.version !== 2 && state.version !== 3 && state.version !== 4) {
+        return false;
+      }
       for (const id of state.seen ?? []) this.seen.add(id);
-      if (state.version === 3) {
+      if (state.version >= 3) {
         for (const id of state.acknowledged ?? []) {
-          if (!this.seen.has(id)) this.acknowledged.add(id);
+          if (!this.seen.has(id) && !this.quarantined.has(id)) {
+            this.acknowledged.add(id);
+          }
+        }
+      }
+      if (state.version === 4) {
+        for (const [id, attempts] of Object.entries(state.failures ?? {})) {
+          if (
+            !this.seen.has(id) &&
+            !this.quarantined.has(id) &&
+            Number.isSafeInteger(attempts) &&
+            attempts > 0
+          ) {
+            this.failures.set(id, attempts);
+          }
+        }
+        for (const id of state.quarantined ?? []) {
+          if (!this.seen.has(id)) {
+            this.quarantined.add(id);
+            this.acknowledged.delete(id);
+            this.failures.delete(id);
+          }
         }
       }
       return true;
@@ -1197,7 +1268,7 @@ export class DesktopDedupeStore {
   }
 
   has(id: string): boolean {
-    return this.seen.has(id);
+    return this.seen.has(id) || this.quarantined.has(id);
   }
 
   hasAcknowledged(id: string): boolean {
@@ -1206,7 +1277,13 @@ export class DesktopDedupeStore {
 
   /** Reserve one acknowledgement before invoking the official client. */
   async claimAcknowledgement(id: string): Promise<boolean> {
-    if (this.seen.has(id) || this.acknowledged.has(id)) return false;
+    if (
+      this.seen.has(id) ||
+      this.quarantined.has(id) ||
+      this.acknowledged.has(id)
+    ) {
+      return false;
+    }
     this.acknowledged.add(id);
     this.trim(this.acknowledged);
     try {
@@ -1222,14 +1299,46 @@ export class DesktopDedupeStore {
     this.seen.delete(id);
     this.seen.add(id);
     this.acknowledged.delete(id);
+    this.failures.delete(id);
+    this.quarantined.delete(id);
     this.trim(this.seen);
     await this.persist();
+  }
+
+  /** Retry one poison event finitely, then durably quarantine only that id. */
+  async recordFailure(
+    id: string,
+    maxAttempts: number,
+  ): Promise<DesktopFailureDisposition> {
+    if (!Number.isSafeInteger(maxAttempts) || maxAttempts < 1) {
+      throw new Error("desktop inbound retry limit is invalid");
+    }
+    if (this.seen.has(id) || this.quarantined.has(id)) {
+      return {
+        attempt: this.failures.get(id) ?? maxAttempts,
+        quarantined: true,
+      };
+    }
+    const attempt = (this.failures.get(id) ?? 0) + 1;
+    if (attempt >= maxAttempts) {
+      this.failures.delete(id);
+      this.acknowledged.delete(id);
+      this.quarantined.add(id);
+      this.trim(this.quarantined);
+    } else {
+      this.failures.set(id, attempt);
+      this.trimMap(this.failures);
+    }
+    await this.persist();
+    return { attempt, quarantined: attempt >= maxAttempts };
   }
 
   async baseline(ids: string[]): Promise<void> {
     for (const id of ids) {
       this.seen.add(id);
       this.acknowledged.delete(id);
+      this.failures.delete(id);
+      this.quarantined.delete(id);
     }
     this.trim(this.seen);
     await this.persist();
@@ -1243,6 +1352,14 @@ export class DesktopDedupeStore {
     }
   }
 
+  private trimMap(values: Map<string, number>): void {
+    while (values.size > this.maxEntries) {
+      const oldest = values.keys().next().value as string | undefined;
+      if (!oldest) break;
+      values.delete(oldest);
+    }
+  }
+
   private async persist(): Promise<void> {
     const path = resolveUserPath(this.statePath);
     const directory = dirname(path);
@@ -1250,9 +1367,11 @@ export class DesktopDedupeStore {
     await chmod(directory, 0o700);
     const temporary = `${path}.${process.pid}.tmp`;
     const state: DedupeState = {
-      version: 3,
+      version: 4,
       seen: [...this.seen],
       acknowledged: [...this.acknowledged],
+      failures: Object.fromEntries(this.failures),
+      quarantined: [...this.quarantined],
       updatedAt: new Date().toISOString(),
     };
     await writeFile(temporary, `${JSON.stringify(state, null, 2)}\n`, {
