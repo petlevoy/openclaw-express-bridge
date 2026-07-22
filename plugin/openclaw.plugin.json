@@ -2,7 +2,7 @@
   "id": "openclaw-express",
   "name": "eXpress",
   "description": "eXpress channel plugin (BotX or official Linux desktop bridge)",
-  "version": "2.2.0",
+  "version": "2.2.1",
   "channels": ["express"],
   "configSchema": {
     "type": "object",

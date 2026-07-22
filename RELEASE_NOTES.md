@@ -1,5 +1,10 @@
 # Release notes
 
+## 1.1.1
+
+- Ships plugin 2.2.1 with an executable regression fixture for document messages that combine a text body with metadata at `message.payload.payload` and a downloaded blob URL at `message.payload.payload.fileBlob`.
+- Deployment note: replacing the plugin files requires a full gateway process restart. The gateway's in-process restart keeps already-imported ESM modules cached and can otherwise report the new manifest version while continuing to run the previous plugin code.
+
 ## 1.1.0
 
 Desktop file transfer and fail-closed BotX hardening.

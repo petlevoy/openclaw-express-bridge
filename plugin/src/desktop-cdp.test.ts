@@ -100,6 +100,171 @@ describe("eXpress desktop CDP bridge", () => {
     ).toThrow(/offset/);
   });
 
+  it("reads a captioned document and its nested downloaded fileBlob", async () => {
+    class FixtureNode {
+      id = "";
+      className = "";
+      innerText = "";
+      parentElement: FixtureNode | null = null;
+      attributes = new Map<string, string>();
+      descendants: FixtureNode[] = [];
+
+      getAttribute(name: string) {
+        return this.attributes.get(name) ?? null;
+      }
+
+      closest(selector: string) {
+        return selector === ".chat-message-row--opponent" ? this : null;
+      }
+
+      querySelector(selector: string) {
+        if (selector === ".chat-message__text") {
+          return { innerText: this.innerText };
+        }
+        return null;
+      }
+
+      querySelectorAll(selector: string) {
+        return selector === "*" ? this.descendants : [];
+      }
+    }
+
+    const messageId = "00000000-0000-4000-8000-000000000011";
+    const senderId = "00000000-0000-4000-8000-000000000099";
+    const chatId = "00000000-0000-4000-8000-000000000088";
+    const bytes = new TextEncoder().encode("%PDF-fixture");
+    const filePayload: {
+      type: string;
+      fileId: string;
+      fileName: string;
+      fileSize: number;
+      fileMimeType: string;
+      fileBlob?: string;
+    } = {
+      type: "document",
+      fileId: messageId,
+      fileName: "KOD-128-180726.PDF",
+      fileSize: bytes.length,
+      fileMimeType: "application/pdf",
+    };
+    const message = {
+      syncId: messageId,
+      sender: { userHuid: senderId },
+      payload: {
+        type: "document",
+        body: "Что это?",
+        from: senderId,
+        payload: filePayload,
+      },
+    };
+
+    const messageNode = new FixtureNode();
+    messageNode.id = messageId;
+    messageNode.attributes.set("data-message-type", "document");
+    Object.defineProperty(messageNode, "__reactFiber$fixture", {
+      value: { memoizedProps: { message }, return: null },
+    });
+
+    const documentEntry = new FixtureNode();
+    const onClick = ({ downloadToBlob }: { downloadToBlob: boolean }) => {
+      if (downloadToBlob) {
+        filePayload.fileBlob = "blob:file:fixture";
+      }
+    };
+    Object.defineProperty(documentEntry, "__reactFiber$fixture", {
+      value: {
+        elementType: { name: "MessageEntryDocument" },
+        memoizedProps: { message, onClick },
+        return: null,
+      },
+    });
+    messageNode.descendants = [documentEntry];
+
+    const chatRoot = new FixtureNode();
+    Object.defineProperty(chatRoot, "__reactFiber$fixture", {
+      value: { memoizedProps: { groupChatId: chatId }, return: null },
+    });
+    const titleNode = new FixtureNode();
+    titleNode.innerText = "Petlevoy Vitaly\nstatus";
+    const documentFixture = {
+      getElementById: (id: string) => (id === messageId ? messageNode : null),
+      querySelector: (selector: string) => {
+        if (selector === ".chat") return chatRoot;
+        if (selector === ".chat-header-title-container__text") {
+          return titleNode;
+        }
+        if (
+          selector === ".settings-button__avatar" ||
+          selector === '.slate-message-input[contenteditable="true"]'
+        ) {
+          return new FixtureNode();
+        }
+        return null;
+      },
+      querySelectorAll: (selector: string) => {
+        if (selector === ".chat-message-row--opponent .chat-message") {
+          return [messageNode];
+        }
+        return [];
+      },
+    };
+    const run = <T>(expression: string, fetchImpl?: typeof fetch) =>
+      Function(
+        "document",
+        "Node",
+        "fetch",
+        `return (${expression});`,
+      )(documentFixture, FixtureNode, fetchImpl ?? fetch) as T;
+
+    const snapshot = run<{
+      chatId: string;
+      chatTitle: string;
+      messages: Array<{
+        text: string;
+        attachment: { fileName: string; fileSize: number; mimeType: string };
+      }>;
+    }>(buildDesktopSnapshotExpression());
+    expect(snapshot).toMatchObject({
+      chatId,
+      chatTitle: "Petlevoy Vitaly",
+      messages: [
+        {
+          text: "Что это?",
+          attachment: {
+            fileName: "KOD-128-180726.PDF",
+            fileSize: bytes.length,
+            mimeType: "application/pdf",
+          },
+        },
+      ],
+    });
+
+    expect(run<string>(buildDesktopAttachmentStartExpression(messageId))).toBe(
+      "started",
+    );
+    expect(filePayload.fileBlob).toBe("blob:file:fixture");
+    const fetchFixture = (async (url: string | URL | Request) => {
+      expect(String(url)).toBe("blob:file:fixture");
+      return new Response(new Blob([bytes], { type: "application/pdf" }));
+    }) as typeof fetch;
+    await expect(
+      run<Promise<{ ready: boolean; size: number; mimeType: string }>>(
+        buildDesktopAttachmentStatusExpression(messageId),
+        fetchFixture,
+      ),
+    ).resolves.toEqual({
+      ready: true,
+      size: bytes.length,
+      mimeType: "application/pdf",
+    });
+    const chunk = await run<Promise<{ base64: string; size: number }>>(
+      buildDesktopAttachmentChunkExpression(messageId, 0, bytes.length),
+      fetchFixture,
+    );
+    expect(Buffer.from(chunk.base64, "base64")).toEqual(Buffer.from(bytes));
+    expect(chunk.size).toBe(bytes.length);
+  });
+
   it("targets only the official client's exact attachment inputs", () => {
     expect(DESKTOP_DOCUMENT_INPUT_SELECTOR).toBe(
       'input[id^="document-input"][type="file"][accept="*"]',
