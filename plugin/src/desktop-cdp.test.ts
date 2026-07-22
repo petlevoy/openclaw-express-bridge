@@ -240,7 +240,7 @@ describe("eXpress desktop CDP bridge", () => {
       value: { memoizedProps: { groupChatId: chatId }, return: null },
     });
     const titleNode = new FixtureNode();
-    titleNode.innerText = "Petlevoy Vitaly\nstatus";
+    titleNode.innerText = "Approved chat\nstatus";
     const documentFixture = {
       getElementById: (id: string) => (id === messageId ? messageNode : null),
       querySelector: (selector: string) => {
@@ -281,7 +281,7 @@ describe("eXpress desktop CDP bridge", () => {
     }>(buildDesktopSnapshotExpression());
     expect(snapshot).toMatchObject({
       chatId,
-      chatTitle: "Petlevoy Vitaly",
+      chatTitle: "Approved chat",
       messages: [
         {
           text: "Что это?",

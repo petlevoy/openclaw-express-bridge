@@ -1,9 +1,9 @@
 Package: openclaw-express-bridge
-Version: 1.1.4
+Version: 1.1.5
 Section: net
 Priority: optional
 Architecture: amd64
-Maintainer: Vitaly Petlevoy <petlevoy@gmail.com>
+Maintainer: OpenClaw eXpress Bridge Maintainers <noreply@users.noreply.github.com>
 Depends: bash, coreutils, curl, dbus-user-session, gnome-keyring, nodejs (>= 22.22.3), python3, tar, xvfb
 Description: Headless official eXpress desktop bridge for OpenClaw
  Fail-closed OpenClaw channel bridge using an isolated official eXpress Linux

@@ -1,4 +1,4 @@
-# openclaw-express-bridge 1.1.4
+# openclaw-express-bridge 1.1.5
 
 An installable, fail-closed bridge between OpenClaw and the official eXpress
 Linux desktop client. It runs the client headlessly on an isolated Xvfb display,
@@ -39,7 +39,7 @@ grant was found in the client payload.
 Debian package:
 
 ```bash
-sudo apt install ./openclaw-express-bridge_1.1.4_amd64.deb
+sudo apt install ./openclaw-express-bridge_1.1.5_amd64.deb
 openclaw-express-bridge install
 openclaw-express-bridge install-client
 ```
@@ -47,8 +47,8 @@ openclaw-express-bridge install-client
 Portable archive:
 
 ```bash
-tar -xzf openclaw-express-bridge-1.1.4-linux-amd64.tar.gz
-cd openclaw-express-bridge-1.1.4
+tar -xzf openclaw-express-bridge-1.1.5-linux-amd64.tar.gz
+cd openclaw-express-bridge-1.1.5
 ./install.sh
 ~/.local/bin/openclaw-express-bridge install-client
 ```
@@ -140,23 +140,35 @@ configuration gate and owner-controlled switch file as normal replies. Old
 baseline messages, already-seen IDs, own messages and non-allowlisted senders
 never reach the acknowledgement path.
 
-## File attachments
+## File attachments and transcription
 
-Desktop inbound supports document, image, audio/voice and video entries when the
-official client exposes complete, valid file metadata. For client 3.68.44 the
-bridge resolves the exact nested attachment message and invokes its official
+Desktop mode supports inbound and outbound PDF, DOC/DOCX, XLS/XLSX and PPT/PPTX
+documents. Images are received and sent through the official client's native
+attachment inputs. Audio, voice and video entries are accepted inbound when the
+official client exposes complete, valid file metadata; video also has a native
+outbound input, while audio outbound uses the document input.
+
+For client 3.68.44 the bridge resolves the exact nested attachment message and
+invokes its official
 `MessageEntryBody.loadAttachment({message, downloadToBlob: true})` handler for
 documents, images, audio/voice and video. `MessageEntryDocument.onClick` remains
-a document-only compatibility fallback. It reads
-attachment metadata from `message.payload.payload` or the client's compatible
-file envelope, resolves only verified nested/direct blob fields, and copies only
-a `Blob` or `blob:file:` URL from the canonical nested message into OpenClaw in
-bounded 512 KiB chunks. Stale outer-envelope blobs are ignored whenever the
-exact nested message is present. File UUID, sender UUID, name, size and MIME type
-are checked before and after the download; generic Electron blob types are
-accepted only when the declared file metadata is allowlisted and compatible.
-The saved path and declared media type are passed through OpenClaw's standard
-inbound media context.
+a document-only compatibility fallback. It reads attachment metadata from
+`message.payload.payload` or the client's compatible file envelope, resolves
+only verified nested/direct blob fields, and copies only a `Blob` or
+`blob:file:` URL from the canonical nested message into OpenClaw in bounded
+512 KiB chunks. Stale outer-envelope blobs are ignored whenever the exact nested
+message is present. File UUID, sender UUID, name, size and MIME type are checked
+before and after the download; generic Electron blob types are accepted only
+when the declared file metadata is allowlisted and compatible. The saved path
+and declared media type are passed through OpenClaw's standard inbound media
+context.
+
+The bridge does not bundle a speech-to-text service. Audio and voice arrive
+through OpenClaw's generic inbound media context, so transcription is performed
+only if the OpenClaw operator configures an STT-capable provider in their own
+deployment. Each operator selects, supplies credentials for, and pays for that
+provider; this package contains no provider-specific transcription script,
+credential or account configuration.
 
 A failed attachment is retried three times with a durable per-message counter.
 If it remains unreadable, only that exact message ID is quarantined; later
@@ -189,9 +201,9 @@ HTTP(S) URLs on the configured CTS origin, reject embedded credentials and
 redirects, and enforce the media limit both from `Content-Length` and while
 streaming. Non-loopback CTS endpoints must use HTTPS.
 
-## PDF scope matrix
+## Feature scope matrix
 
-| Requirement | 1.1.4 state |
+| Requirement | 1.1.5 state |
 |---|---|
 | Native OpenClaw channel lifecycle | Implemented |
 | Default/named account configuration | Implemented; concurrent desktop accounts require separate client/CDP sessions |
@@ -201,9 +213,11 @@ streaming. Non-loopback CTS endpoints must use HTTPS.
 | Standard inbound routing/session context | Desktop implemented |
 | Access policies | Desktop exact allowlist only |
 | Standard outbound text delivery | Desktop and BotX implemented |
-| Files | Desktop receive/send implemented |
-| Images/video | Receive; native outbound input by extension |
-| Voice/audio | Receive as audio media; outbound uses the document input |
+| PDF, DOC(X), XLS(X), PPT(X) | Desktop receive/send implemented |
+| Images | Desktop receive/send implemented |
+| Video | Desktop receive; native outbound input |
+| Voice/audio | Desktop receive as standard OpenClaw audio media; outbound uses the document input |
+| Speech-to-text | Delegated to the operator's generic OpenClaw STT/provider configuration; no provider bundled |
 | Reactions | Not implemented |
 | Chat/thread creation | Not implemented |
 | Typing indicator | Desktop native action with interlocked text fallback; opt-in |
@@ -274,7 +288,7 @@ Please report suspected vulnerabilities privately as described in
   plugin update after a client upgrade.
 - The public build pins one verified client release; a newer release requires a
   reviewed URL and SHA-256 update in `client.env`.
-- Only Linux amd64 and one exact direct chat are covered by the 1.1.4 bootstrap.
+- Only Linux amd64 and one exact direct chat are covered by the 1.1.5 bootstrap.
 - No live eXpress file was sent by the automated test suite; the desktop file
   contract is covered by unit tests and must be canary-tested in an approved chat.
 - BotX inbound, shared-listener routing, reactions and chat/thread creation are

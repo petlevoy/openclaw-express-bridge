@@ -1,5 +1,23 @@
 # Release notes
 
+## 1.1.5
+
+- Publishes bridge 1.1.5 with the unchanged eXpress plugin 2.2.4. There is no
+  plugin runtime-code change from bridge 1.1.4.
+- Documents bidirectional desktop transfer for PDF, DOC/DOCX, XLS/XLSX and
+  PPT/PPTX documents, plus bidirectional images and inbound audio/voice/video.
+  Video retains its native outbound input; outbound audio continues to use the
+  document input.
+- Documents the generic OpenClaw speech-to-text boundary. The bridge passes
+  audio and voice through standard inbound media context and does not bundle a
+  transcription provider. Each operator selects, supplies credentials for, and
+  pays for their own STT-capable provider in OpenClaw.
+- Documents opt-in native typing acknowledgement with its gated short-text
+  fallback, durable per-event quarantine after three failed attachment attempts,
+  and the fail-closed outbound/configuration security gates.
+- Public artifacts contain no provider-specific transcription script,
+  credentials, local state, chat/user identifiers or deployment configuration.
+
 ## 1.1.4
 
 - Ships plugin 2.2.4 with the live eXpress 3.68.44 attachment shape fixed for
