@@ -6,6 +6,10 @@ import { join } from "node:path";
 import { createReplyPrefixOptions } from "openclaw/plugin-sdk/channel-runtime";
 
 import {
+  type DesktopAckHandle,
+  withDesktopInboundAcknowledgement,
+} from "./desktop-ack.js";
+import {
   DEFAULT_DESKTOP_MEDIA_MAX_MB,
   desktopClientFromAccount,
   DesktopDedupeStore,
@@ -122,10 +126,32 @@ export async function startExpressDesktopMonitor(
           );
           for (const message of queued) {
             if (abortSignal.aborted) break;
-            await sleepWithAbort(rateLimiter.reserve(), abortSignal);
-            if (abortSignal.aborted) break;
-            await dispatchDesktopInbound(opts, message, client);
-            await store.add(message.id);
+            await withDesktopInboundAcknowledgement(
+              {
+                account,
+                client,
+                targetChatId: chatId,
+                claim: () => store.claimAcknowledgement(message.id),
+                onActivity: () => statusSink?.({ lastOutboundAt: Date.now() }),
+                onError: (kind, error) =>
+                  log?.warn?.(
+                    `[${account.accountId}] eXpress desktop ${kind} acknowledgement unavailable: ${redactDesktopError(error)}`,
+                  ),
+              },
+              async (acknowledgement) => {
+                await sleepWithAbort(rateLimiter.reserve(), abortSignal);
+                if (abortSignal.aborted) return;
+                await dispatchDesktopInbound(
+                  opts,
+                  message,
+                  client,
+                  acknowledgement,
+                );
+              },
+            );
+            if (!abortSignal.aborted) {
+              await store.add(message.id);
+            }
           }
         }
         await sleepWithAbort(pollIntervalMs, abortSignal);
@@ -151,6 +177,7 @@ async function dispatchDesktopInbound(
   opts: ExpressMonitorOptions,
   message: DesktopMessage,
   client: ReturnType<typeof desktopClientFromAccount>,
+  acknowledgement?: DesktopAckHandle,
 ): Promise<void> {
   const { account, config, log, statusSink } = opts;
   const senderId = account.config.desktopSenderId!;
@@ -270,6 +297,7 @@ async function dispatchDesktopInbound(
         mediaUrls?: string[];
         mediaUrl?: string;
       }) => {
+        await acknowledgement?.stop();
         if (!(await isDesktopOutboundUnlocked(account))) {
           log?.info?.(
             `[${account.accountId}] eXpress desktop reply withheld by outbound interlock`,

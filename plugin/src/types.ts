@@ -156,6 +156,10 @@ export interface ExpressAccountConfig {
   desktopOutboundSwitchPath?: string;
   /** Additional roots from which desktop outbound files may be attached. */
   desktopMediaRoots?: string[];
+  /** Immediate inbound acknowledgement; disabled unless explicitly enabled. */
+  desktopAckMode?: "off" | "typing" | "message";
+  /** Text acknowledgement and fallback when native typing is unavailable. */
+  desktopAckText?: string;
 }
 
 export interface ExpressChannelConfig {
@@ -185,6 +189,8 @@ export interface ExpressChannelConfig {
   desktopOutboundEnabled?: boolean;
   desktopOutboundSwitchPath?: string;
   desktopMediaRoots?: string[];
+  desktopAckMode?: "off" | "typing" | "message";
+  desktopAckText?: string;
 }
 
 // NOTE: ResolvedExpressAccount определён в accounts.ts (каноничный источник)

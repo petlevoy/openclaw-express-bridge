@@ -58,6 +58,8 @@ export const ExpressAccountSchemaBase = z
     desktopOutboundEnabled: z.boolean().optional(),
     desktopOutboundSwitchPath: z.string().min(1).optional(),
     desktopMediaRoots: z.array(z.string().min(1)).max(16).optional(),
+    desktopAckMode: z.enum(["off", "typing", "message"]).optional(),
+    desktopAckText: z.string().trim().min(1).max(160).optional(),
     actions: z
       .record(
         z.string(),

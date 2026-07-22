@@ -210,6 +210,8 @@ describe("eXpress Account Resolution", () => {
             allowFrom: ["huid-1", "huid-2"],
             markdown: { tables: "bullets" },
             actions: { send: "allowlist" },
+            desktopAckMode: "typing",
+            desktopAckText: "Взял в работу",
           },
         },
       };
@@ -218,6 +220,8 @@ describe("eXpress Account Resolution", () => {
       expect(account.config.allowFrom).toEqual(["huid-1", "huid-2"]);
       expect(account.config.markdown).toEqual({ tables: "bullets" });
       expect(account.config.actions).toEqual({ send: "allowlist" });
+      expect(account.config.desktopAckMode).toBe("typing");
+      expect(account.config.desktopAckText).toBe("Взял в работу");
     });
   });
 });

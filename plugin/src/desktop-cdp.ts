@@ -117,10 +117,12 @@ export const DESKTOP_IMAGE_INPUT_SELECTOR =
   'input[id^="image-input"][type="file"][accept="image/gif,image/jpeg,image/png,image/vnd.microsoft.icon,image/webp,image/bmp"]';
 export const DESKTOP_VIDEO_INPUT_SELECTOR =
   'input[id^="video-input"][type="file"][accept="video/*"]';
+export const DESKTOP_TYPING_FAILSAFE_MS = 8_000;
 
 interface DedupeState {
-  version: 2;
+  version: 2 | 3;
   seen: string[];
+  acknowledged?: string[];
   updatedAt: string;
 }
 
@@ -583,6 +585,55 @@ function buildFocusComposerExpression(): string {
   })()`;
 }
 
+/**
+ * Invoke the official client's own typing action without mutating the editor.
+ * The exact component/chat checks make client drift fail closed; callers can
+ * then use a configured text acknowledgement as a compatibility fallback.
+ */
+export function buildDesktopTypingExpression(
+  chatId: string,
+  active: boolean,
+): string {
+  const expected = JSON.stringify(chatId);
+  return `(() => {
+    const expected = ${expected};
+    const editor = document.querySelector('.slate-message-input[contenteditable="true"]');
+    if (!editor) return false;
+    const fiberKey = Object.getOwnPropertyNames(editor).find((key) => key.startsWith('__reactFiber$'));
+    let fiber = fiberKey ? editor[fiberKey] : null;
+    for (let index = 0; fiber && index < 40; index += 1, fiber = fiber.return) {
+      const componentName = String(
+        fiber.elementType?.displayName ||
+        fiber.elementType?.name ||
+        fiber.type?.displayName ||
+        fiber.type?.name ||
+        '',
+      );
+      const props = fiber.memoizedProps;
+      if (
+        componentName === 'ChatInputText' &&
+        props?.chat?.groupChatId === expected &&
+        typeof props.onUserTyping === 'function'
+      ) {
+        const timerKey = Symbol.for('openclaw.express.desktopTypingStopTimer');
+        const previousTimer = globalThis[timerKey];
+        if (previousTimer) clearTimeout(previousTimer);
+        props.onUserTyping(expected, ${active ? "true" : "false"});
+        if (${active ? "true" : "false"}) {
+          globalThis[timerKey] = setTimeout(() => {
+            try { props.onUserTyping(expected, false); } catch {}
+            delete globalThis[timerKey];
+          }, ${DESKTOP_TYPING_FAILSAFE_MS});
+        } else {
+          delete globalThis[timerKey];
+        }
+        return true;
+      }
+    }
+    return false;
+  })()`;
+}
+
 function buildAttachmentLookupExpression(messageId: string): string {
   const expected = JSON.stringify(messageId);
   return `(() => {
@@ -897,6 +948,23 @@ export class ExpressDesktopClient {
     );
   }
 
+  async setTyping(targetChatId: string, active: boolean): Promise<void> {
+    if (targetChatId !== this.config.chatId) {
+      throw new Error("desktop outbound target is not allowlisted");
+    }
+    const before = await this.snapshot();
+    this.assertSnapshotAllowed(before);
+    if (!before.composerReady) {
+      throw new Error("desktop message composer is unavailable");
+    }
+    const invoked = await this.evaluate<boolean>(
+      buildDesktopTypingExpression(targetChatId, active),
+    );
+    if (!invoked) {
+      throw new Error("desktop native typing action is unavailable");
+    }
+  }
+
   async downloadAttachment(
     message: DesktopMessage,
     maxBytes: number,
@@ -1098,6 +1166,7 @@ export class ExpressDesktopClient {
 
 export class DesktopDedupeStore {
   private readonly seen = new Set<string>();
+  private readonly acknowledged = new Set<string>();
   private loaded = false;
 
   constructor(
@@ -1112,8 +1181,13 @@ export class DesktopDedupeStore {
       const state = JSON.parse(
         await readFile(resolveUserPath(this.statePath), "utf8"),
       ) as DedupeState;
-      if (state.version !== 2) return false;
+      if (state.version !== 2 && state.version !== 3) return false;
       for (const id of state.seen ?? []) this.seen.add(id);
+      if (state.version === 3) {
+        for (const id of state.acknowledged ?? []) {
+          if (!this.seen.has(id)) this.acknowledged.add(id);
+        }
+      }
       return true;
     } catch (error) {
       const code = (error as NodeJS.ErrnoException).code;
@@ -1126,20 +1200,47 @@ export class DesktopDedupeStore {
     return this.seen.has(id);
   }
 
+  hasAcknowledged(id: string): boolean {
+    return this.acknowledged.has(id);
+  }
+
+  /** Reserve one acknowledgement before invoking the official client. */
+  async claimAcknowledgement(id: string): Promise<boolean> {
+    if (this.seen.has(id) || this.acknowledged.has(id)) return false;
+    this.acknowledged.add(id);
+    this.trim(this.acknowledged);
+    try {
+      await this.persist();
+      return true;
+    } catch (error) {
+      this.acknowledged.delete(id);
+      throw error;
+    }
+  }
+
   async add(id: string): Promise<void> {
     this.seen.delete(id);
     this.seen.add(id);
-    while (this.seen.size > this.maxEntries) {
-      const oldest = this.seen.values().next().value as string | undefined;
-      if (!oldest) break;
-      this.seen.delete(oldest);
-    }
+    this.acknowledged.delete(id);
+    this.trim(this.seen);
     await this.persist();
   }
 
   async baseline(ids: string[]): Promise<void> {
-    for (const id of ids) this.seen.add(id);
+    for (const id of ids) {
+      this.seen.add(id);
+      this.acknowledged.delete(id);
+    }
+    this.trim(this.seen);
     await this.persist();
+  }
+
+  private trim(values: Set<string>): void {
+    while (values.size > this.maxEntries) {
+      const oldest = values.values().next().value as string | undefined;
+      if (!oldest) break;
+      values.delete(oldest);
+    }
   }
 
   private async persist(): Promise<void> {
@@ -1149,8 +1250,9 @@ export class DesktopDedupeStore {
     await chmod(directory, 0o700);
     const temporary = `${path}.${process.pid}.tmp`;
     const state: DedupeState = {
-      version: 2,
+      version: 3,
       seen: [...this.seen],
+      acknowledged: [...this.acknowledged],
       updatedAt: new Date().toISOString(),
     };
     await writeFile(temporary, `${JSON.stringify(state, null, 2)}\n`, {

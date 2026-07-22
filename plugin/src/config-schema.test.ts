@@ -74,6 +74,23 @@ describe("Config Schema", () => {
         false,
       );
     });
+
+    it("keeps desktop acknowledgement explicit and bounded", () => {
+      expect(
+        ExpressAccountSchema.safeParse({
+          desktopAckMode: "typing",
+          desktopAckText: "Взял в работу",
+        }).success,
+      ).toBe(true);
+      expect(
+        ExpressAccountSchema.safeParse({ desktopAckMode: "unknown" }).success,
+      ).toBe(false);
+      expect(
+        ExpressAccountSchema.safeParse({
+          desktopAckText: "x".repeat(161),
+        }).success,
+      ).toBe(false);
+    });
   });
 
   describe("ExpressConfigSchema", () => {

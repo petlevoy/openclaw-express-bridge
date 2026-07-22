@@ -1,4 +1,4 @@
-# openclaw-express-bridge 1.1.2
+# openclaw-express-bridge 1.1.3
 
 An installable, fail-closed bridge between OpenClaw and the official eXpress
 Linux desktop client. It runs the client headlessly on an isolated Xvfb display,
@@ -39,7 +39,7 @@ grant was found in the client payload.
 Debian package:
 
 ```bash
-sudo apt install ./openclaw-express-bridge_1.1.2_amd64.deb
+sudo apt install ./openclaw-express-bridge_1.1.3_amd64.deb
 openclaw-express-bridge install
 openclaw-express-bridge install-client
 ```
@@ -47,8 +47,8 @@ openclaw-express-bridge install-client
 Portable archive:
 
 ```bash
-tar -xzf openclaw-express-bridge-1.1.2-linux-amd64.tar.gz
-cd openclaw-express-bridge-1.1.2
+tar -xzf openclaw-express-bridge-1.1.3-linux-amd64.tar.gz
+cd openclaw-express-bridge-1.1.3
 ./install.sh
 ~/.local/bin/openclaw-express-bridge install-client
 ```
@@ -123,6 +123,23 @@ screenshots and backups are mode 0700/0600 and are never part of build artifacts
 The switch must be an owner-controlled, mode-0600 regular file; symlinks,
 directories and loose permissions keep outbound locked.
 
+## Immediate inbound acknowledgement
+
+Acknowledgement is disabled by default. Set `desktopAckMode` to `typing` to
+invoke the official client's own native `ChatInputText.onUserTyping` action as
+soon as an unseen inbound message has passed exact sender/chat validation and
+deduplication. The bridge refreshes the indicator while OpenClaw is working and
+stops it before the first reply. It does not insert placeholder text into the
+composer. If client drift makes that verified action unavailable, the bridge
+sends one short `desktopAckText` message instead; its default is
+`Взял в работу`. Set the mode to `message` to always use the short message, or
+`off` to disable acknowledgement.
+
+Typing, keepalives, stop actions, and the text fallback each re-check the same
+configuration gate and owner-controlled switch file as normal replies. Old
+baseline messages, already-seen IDs, own messages and non-allowlisted senders
+never reach the acknowledgement path.
+
 ## File attachments
 
 Desktop inbound supports document, image, audio/voice and video entries when the
@@ -166,7 +183,7 @@ streaming. Non-loopback CTS endpoints must use HTTPS.
 
 ## PDF scope matrix
 
-| Requirement | 1.1.2 state |
+| Requirement | 1.1.3 state |
 |---|---|
 | Native OpenClaw channel lifecycle | Implemented |
 | Default/named account configuration | Implemented; concurrent desktop accounts require separate client/CDP sessions |
@@ -181,7 +198,7 @@ streaming. Non-loopback CTS endpoints must use HTTPS.
 | Voice/audio | Receive as audio media; outbound uses the document input |
 | Reactions | Not implemented |
 | Chat/thread creation | Not implemented |
-| Typing indicator | Not implemented |
+| Typing indicator | Desktop native action with interlocked text fallback; opt-in |
 | Markdown conversion | Outbound Markdown-to-plain-text only |
 
 ## Command reference
@@ -249,11 +266,11 @@ Please report suspected vulnerabilities privately as described in
   plugin update after a client upgrade.
 - The public build pins one verified client release; a newer release requires a
   reviewed URL and SHA-256 update in `client.env`.
-- Only Linux amd64 and one exact direct chat are covered by the 1.1.2 bootstrap.
+- Only Linux amd64 and one exact direct chat are covered by the 1.1.3 bootstrap.
 - No live eXpress file was sent by the automated test suite; the desktop file
   contract is covered by unit tests and must be canary-tested in an approved chat.
-- BotX inbound, shared-listener routing, reactions, chat/thread creation and
-  typing indicators are not implemented.
+- BotX inbound, shared-listener routing, reactions and chat/thread creation are
+  not implemented.
 - Backups are access-controlled but not encrypted by this tool.
 
 ## License

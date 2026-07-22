@@ -2,7 +2,7 @@
   "id": "openclaw-express",
   "name": "eXpress",
   "description": "eXpress channel plugin (BotX or official Linux desktop bridge)",
-  "version": "2.2.2",
+  "version": "2.2.3",
   "channels": ["express"],
   "configSchema": {
     "type": "object",
@@ -82,6 +82,17 @@
             "maxItems": 16,
             "items": { "type": "string", "minLength": 1 }
           },
+          "desktopAckMode": {
+            "type": "string",
+            "enum": ["off", "typing", "message"],
+            "description": "Immediate acknowledgement after validated, deduplicated desktop inbound; defaults to off"
+          },
+          "desktopAckText": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 160,
+            "description": "Text acknowledgement and fallback when native typing is unavailable"
+          },
           "accounts": {
             "type": "object",
             "additionalProperties": {
@@ -155,6 +166,15 @@
                   "type": "array",
                   "maxItems": 16,
                   "items": { "type": "string", "minLength": 1 }
+                },
+                "desktopAckMode": {
+                  "type": "string",
+                  "enum": ["off", "typing", "message"]
+                },
+                "desktopAckText": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 160
                 }
               }
             }

@@ -119,6 +119,9 @@ export function resolveExpressAccount(params: {
       desktopOutboundSwitchPath: section.desktopOutboundSwitchPath as
         string | undefined,
       desktopMediaRoots: section.desktopMediaRoots as string[] | undefined,
+      desktopAckMode: section.desktopAckMode as
+        ExpressAccountConfig["desktopAckMode"] | undefined,
+      desktopAckText: section.desktopAckText as string | undefined,
     };
   } else {
     // Named account
@@ -149,6 +152,9 @@ export function resolveExpressAccount(params: {
       desktopOutboundSwitchPath: raw.desktopOutboundSwitchPath as
         string | undefined,
       desktopMediaRoots: raw.desktopMediaRoots as string[] | undefined,
+      desktopAckMode: raw.desktopAckMode as
+        ExpressAccountConfig["desktopAckMode"] | undefined,
+      desktopAckText: raw.desktopAckText as string | undefined,
     };
   }
 

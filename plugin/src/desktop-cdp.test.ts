@@ -17,6 +17,7 @@ import {
   buildDesktopAttachmentStartExpression,
   buildDesktopAttachmentStatusExpression,
   buildDesktopSnapshotExpression,
+  buildDesktopTypingExpression,
   DESKTOP_DOCUMENT_INPUT_SELECTOR,
   DESKTOP_IMAGE_INPUT_SELECTOR,
   DESKTOP_VIDEO_INPUT_SELECTOR,
@@ -72,6 +73,55 @@ describe("eXpress desktop CDP bridge", () => {
     expect(expression).toContain("split(/\\r?\\n/, 1)");
     expect(expression).not.toContain(".click()");
     expect(expression).not.toContain("Input.insertText");
+  });
+
+  it("invokes only the exact official-client native typing action", () => {
+    const chatId = "00000000-0000-4000-8000-000000000088";
+    const calls: Array<[string, boolean]> = [];
+    const editor = {};
+    Object.defineProperty(editor, "__reactFiber$fixture", {
+      value: {
+        elementType: { displayName: "ChatInputText" },
+        memoizedProps: {
+          chat: { groupChatId: chatId },
+          onUserTyping: (target: string, active: boolean) =>
+            calls.push([target, active]),
+        },
+        return: null,
+      },
+    });
+    const documentFixture = {
+      querySelector: () => editor,
+    };
+    const run = (expression: string) =>
+      Function("document", `return (${expression});`)(documentFixture) as
+        boolean | undefined;
+
+    expect(run(buildDesktopTypingExpression(chatId, true))).toBe(true);
+    expect(calls).toEqual([[chatId, true]]);
+    expect(run(buildDesktopTypingExpression(chatId, false))).toBe(true);
+    expect(calls).toEqual([
+      [chatId, true],
+      [chatId, false],
+    ]);
+    expect(
+      run(
+        buildDesktopTypingExpression(
+          "00000000-0000-4000-8000-000000000077",
+          false,
+        ),
+      ),
+    ).toBe(false);
+    expect(calls).toEqual([
+      [chatId, true],
+      [chatId, false],
+    ]);
+    expect(buildDesktopTypingExpression(chatId, true)).not.toContain(
+      "Input.insertText",
+    );
+    expect(buildDesktopTypingExpression(chatId, true)).toContain(
+      "desktopTypingStopTimer",
+    );
   });
 
   it("uses the official MessageEntry onClick contract and blob URLs", () => {
@@ -780,5 +830,41 @@ describe("eXpress desktop CDP bridge", () => {
       seen: string[];
     };
     expect(raw.seen).toEqual(["two", "three", "four"]);
+  });
+
+  it("durably claims one acknowledgement across a restart", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "express-ack-test-"));
+    const statePath = join(directory, "state.json");
+    const first = new DesktopDedupeStore(statePath, 3);
+    expect(await first.load()).toBe(false);
+    expect(await first.claimAcknowledgement("message-one")).toBe(true);
+    expect(await first.claimAcknowledgement("message-one")).toBe(false);
+
+    const second = new DesktopDedupeStore(statePath, 3);
+    expect(await second.load()).toBe(true);
+    expect(second.hasAcknowledged("message-one")).toBe(true);
+    expect(await second.claimAcknowledgement("message-one")).toBe(false);
+    await second.add("message-one");
+
+    const third = new DesktopDedupeStore(statePath, 3);
+    expect(await third.load()).toBe(true);
+    expect(third.has("message-one")).toBe(true);
+    expect(third.hasAcknowledged("message-one")).toBe(false);
+  });
+
+  it("loads the previous dedupe format without replaying visible messages", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "express-state-v2-test-"));
+    const statePath = join(directory, "state.json");
+    await writeFile(
+      statePath,
+      JSON.stringify({
+        version: 2,
+        seen: ["legacy-seen"],
+        updatedAt: new Date(0).toISOString(),
+      }),
+    );
+    const store = new DesktopDedupeStore(statePath);
+    expect(await store.load()).toBe(true);
+    expect(store.has("legacy-seen")).toBe(true);
   });
 });

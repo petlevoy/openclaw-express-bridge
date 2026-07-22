@@ -1,5 +1,21 @@
 # Release notes
 
+## 1.1.3
+
+- Ships plugin 2.2.3 with opt-in immediate desktop acknowledgement after exact
+  sender/chat validation and persistent message-ID deduplication.
+- Uses the official eXpress 3.68.44 `ChatInputText.onUserTyping` action for a
+  native typing indicator without changing the editor or sending placeholder
+  keystrokes. The indicator is refreshed during processing and stopped before
+  the first response.
+- Adds `desktopAckMode=off|typing|message` with the fail-closed default `off` and
+  bounded `desktopAckText`. If the exact native client action is unavailable,
+  `typing` mode sends one short text acknowledgement instead.
+- Re-checks both existing outbound interlocks before each typing, keepalive,
+  stop or text-fallback action. Baseline, seen, own and non-allowlisted messages
+  remain outside the acknowledgement path.
+- No live eXpress message was sent while implementing or testing this release.
+
 ## 1.1.2
 
 - Ships plugin 2.2.2 with the live eXpress 3.68.44 document component shape covered by regression tests: the message envelope remains on `MessageEntry`, while `MessageEntryDocument` passes the nested document payload to its official loader.
