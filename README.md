@@ -1,4 +1,4 @@
-# openclaw-express-bridge 1.1.5
+# openclaw-express-bridge 1.1.6
 
 An installable, fail-closed bridge between OpenClaw and the official eXpress
 Linux desktop client. It runs the client headlessly on an isolated Xvfb display,
@@ -39,7 +39,7 @@ grant was found in the client payload.
 Debian package:
 
 ```bash
-sudo apt install ./openclaw-express-bridge_1.1.5_amd64.deb
+sudo apt install ./openclaw-express-bridge_1.1.6_amd64.deb
 openclaw-express-bridge install
 openclaw-express-bridge install-client
 ```
@@ -47,8 +47,8 @@ openclaw-express-bridge install-client
 Portable archive:
 
 ```bash
-tar -xzf openclaw-express-bridge-1.1.5-linux-amd64.tar.gz
-cd openclaw-express-bridge-1.1.5
+tar -xzf openclaw-express-bridge-1.1.6-linux-amd64.tar.gz
+cd openclaw-express-bridge-1.1.6
 ./install.sh
 ~/.local/bin/openclaw-express-bridge install-client
 ```
@@ -203,7 +203,7 @@ streaming. Non-loopback CTS endpoints must use HTTPS.
 
 ## Feature scope matrix
 
-| Requirement | 1.1.5 state |
+| Requirement | 1.1.6 state |
 |---|---|
 | Native OpenClaw channel lifecycle | Implemented |
 | Default/named account configuration | Implemented; concurrent desktop accounts require separate client/CDP sessions |
@@ -288,7 +288,7 @@ Please report suspected vulnerabilities privately as described in
   plugin update after a client upgrade.
 - The public build pins one verified client release; a newer release requires a
   reviewed URL and SHA-256 update in `client.env`.
-- Only Linux amd64 and one exact direct chat are covered by the 1.1.5 bootstrap.
+- Only Linux amd64 and one exact direct chat are covered by the 1.1.6 bootstrap.
 - No live eXpress file was sent by the automated test suite; the desktop file
   contract is covered by unit tests and must be canary-tested in an approved chat.
 - BotX inbound, shared-listener routing, reactions and chat/thread creation are

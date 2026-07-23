@@ -1,5 +1,17 @@
 # Release notes
 
+## 1.1.6
+
+- Ships eXpress plugin 2.2.5 and routes generic
+  `message(action="send", media|filePath|attachments=...)` calls through the
+  durable OpenClaw outbound adapter. Previous releases let the legacy
+  plugin-owned text action swallow the media fields and report
+  `ok: true, messageId: ""` without invoking the desktop file sender.
+- Confirms a desktop file send only after the official client exposes a new
+  own attachment with the expected filename, byte size and media kind. A
+  concurrent own text message can no longer produce a false successful file
+  receipt.
+
 ## 1.1.5
 
 - Publishes bridge 1.1.5 with the unchanged eXpress plugin 2.2.4. There is no

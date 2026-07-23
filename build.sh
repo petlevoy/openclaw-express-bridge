@@ -124,7 +124,12 @@ tar -C "$scan_dir/tar" -xzf "$OUT/$NAME-$VERSION-linux-amd64.tar.gz"
 dpkg-deb -x "$OUT/${NAME}_${VERSION}_${ARCH}.deb" "$scan_dir/deb"
 "$ROOT/tests/scan-secrets.sh" "$scan_dir"
 
-(cd "$OUT" && sha256sum ./*"$VERSION"* > SHA256SUMS)
+(
+  cd "$OUT"
+  find . -maxdepth 1 -type f -name "*$VERSION*" -print0 |
+    sort -z |
+    xargs -0 sha256sum > SHA256SUMS
+)
 printf '\nBuilt artifacts:\n'
 find "$OUT" -maxdepth 1 -type f -printf '%f %s bytes\n' | sort
 printf '\nSHA256:\n'

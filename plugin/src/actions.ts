@@ -11,7 +11,7 @@ import type { OpenClawConfig } from "openclaw/plugin-sdk/core";
 import { readStringParam } from "openclaw/plugin-sdk/param-readers";
 
 import { listExpressAccountIds, resolveExpressAccount } from "./accounts.js";
-import { sendExpressMessage } from "./send.js";
+import { sendExpressMediaMessage, sendExpressMessage } from "./send.js";
 
 const providerId = "express";
 
@@ -72,6 +72,14 @@ export const expressMessageActions: ChannelMessageActionAdapter = {
     return { to, accountId };
   },
 
+  /**
+   * Keep generic sends on OpenClaw's durable outbound path. In particular,
+   * media/filePath/attachments must reach channel.outbound.sendMedia instead
+   * of the compatibility action below, which only owns legacy text sends.
+   */
+  prepareSendPayload: ({ ctx, payload }) =>
+    ctx.action === "send" ? payload : null,
+
   handleAction: async ({ action, params, cfg, accountId }) => {
     const account = resolveExpressAccount({ cfg, accountId });
     if (!account.configured) {
@@ -92,12 +100,35 @@ export const expressMessageActions: ChannelMessageActionAdapter = {
         allowEmpty: true,
       });
       const replyTo = readStringParam(params, "replyTo");
+      const mediaPath =
+        readStringParam(params, "media", { trim: false }) ??
+        readStringParam(params, "mediaUrl", { trim: false }) ??
+        readStringParam(params, "filePath", { trim: false }) ??
+        readStringParam(params, "path", { trim: false });
+
+      if (mediaPath) {
+        const result = await sendExpressMediaMessage(to, content, mediaPath, {
+          cfg,
+          accountId: account.accountId,
+          replyToId: replyTo ?? undefined,
+        });
+        if (!result.messageId) {
+          throw new Error("eXpress media send returned no message id");
+        }
+        return jsonResult({ ok: true, to, messageId: result.messageId });
+      }
+      if (!content.trim()) {
+        throw new Error("eXpress send requires a message or media");
+      }
 
       const result = await sendExpressMessage(to, content, {
         cfg,
         accountId: account.accountId,
         replyToId: replyTo ?? undefined,
       });
+      if (!result.messageId) {
+        throw new Error("eXpress text send returned no message id");
+      }
       return jsonResult({ ok: true, to, messageId: result.messageId });
     }
 

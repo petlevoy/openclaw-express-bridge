@@ -17,6 +17,7 @@ import {
 } from "node:fs/promises";
 import { homedir } from "node:os";
 import {
+  basename,
   dirname,
   extname,
   isAbsolute,
@@ -79,6 +80,7 @@ export interface DesktopSnapshot {
   chatTitle: string | null;
   composerReady: boolean;
   messages: DesktopMessage[];
+  ownMessages: DesktopMessage[];
   lastOwnMessageId: string | null;
 }
 
@@ -222,6 +224,67 @@ export function desktopInputSelectorFor(kind: DesktopOutboundKind): string {
   if (kind === "image") return DESKTOP_IMAGE_INPUT_SELECTOR;
   if (kind === "video") return DESKTOP_VIDEO_INPUT_SELECTOR;
   return DESKTOP_DOCUMENT_INPUT_SELECTOR;
+}
+
+export function buildDesktopSendFileExpression(
+  kind: DesktopOutboundKind,
+  fileName: string,
+  fileSize: number,
+): string {
+  const inputSelector = JSON.stringify(desktopInputSelectorFor(kind));
+  const expectedName = JSON.stringify(fileName);
+  return `(() => {
+    const input = document.querySelector(${inputSelector});
+    const attachments = document.querySelectorAll('.message-input .input-attachment__file');
+    const buttons = document.querySelectorAll('.message-input__actions button');
+    const selected = input?.files?.[0];
+    if (
+      input?.files?.length !== 1 ||
+      selected?.name !== ${expectedName} ||
+      selected?.size !== ${fileSize} ||
+      attachments.length !== 1 ||
+      buttons.length !== 1 ||
+      buttons[0].disabled
+    ) {
+      return false;
+    }
+    buttons[0].click();
+    return true;
+  })()`;
+}
+
+function buildDesktopComposerHasNoAttachmentsExpression(): string {
+  return `(() => (
+    document.querySelectorAll('.message-input .input-attachment__file').length === 0 &&
+    [...document.querySelectorAll('.message-input input[type="file"]')]
+      .every((input) => !input.files || input.files.length === 0)
+  ))()`;
+}
+
+function desktopMessageTypeForOutboundKind(
+  kind: DesktopOutboundKind,
+): DesktopMessage["type"] {
+  if (kind === "image") return "image";
+  if (kind === "video") return "video";
+  return "document";
+}
+
+export function confirmedDesktopOutboundFileMessageId(
+  before: Pick<DesktopSnapshot, "ownMessages">,
+  after: Pick<DesktopSnapshot, "ownMessages">,
+  file: Pick<DesktopOutboundFile, "path" | "size" | "kind">,
+): string | null {
+  const previousIds = new Set(before.ownMessages.map((message) => message.id));
+  const expectedType = desktopMessageTypeForOutboundKind(file.kind);
+  const expectedName = basename(file.path);
+  const delivered = after.ownMessages.find(
+    (message) =>
+      !previousIds.has(message.id) &&
+      message.type === expectedType &&
+      message.attachment?.fileName === expectedName &&
+      message.attachment.fileSize === file.size,
+  );
+  return delivered?.id ?? null;
 }
 
 export async function validateDesktopOutboundFile(
@@ -516,7 +579,7 @@ export function buildDesktopSnapshotExpression(): string {
       if (payloadType === 'video') return 'video';
       return 'file';
     }
-    function findFilePayload(message) {
+    function findFilePayload(message, requireFileId) {
       const candidates = [
         message?.payload?.payload,
         message?.payload?.file,
@@ -525,48 +588,55 @@ export function buildDesktopSnapshotExpression(): string {
       return candidates.find((candidate) =>
         candidate &&
         typeof candidate === 'object' &&
-        typeof candidate.fileId === 'string' &&
+        (!requireFileId || typeof candidate.fileId === 'string') &&
         typeof candidate.fileName === 'string' &&
         Number.isSafeInteger(candidate.fileSize),
       ) || null;
     }
     const supportedTypes = new Set(['text', 'document', 'image', 'audio', 'voice', 'video']);
+    function parseMessage(node, own) {
+      const id = String(node?.id || '').trim();
+      const message = findMessage(node, id);
+      const senderId = String(message?.sender?.userHuid || message?.payload?.from || '').trim();
+      const type = node?.getAttribute?.('data-message-type');
+      if (!supportedTypes.has(type)) return null;
+      const text = String(message?.payload?.body || node.querySelector('.chat-message__text')?.innerText || '').trim();
+      if (type === 'text') return { id, senderId, type, text };
+      const file = findFilePayload(message, !own);
+      if (!file) return null;
+      const mimeType = String(file?.fileMimeType || 'application/octet-stream').trim().toLowerCase();
+      return {
+        id,
+        senderId,
+        type,
+        text,
+        attachment: {
+          fileId: String(file?.fileId || id).trim(),
+          fileName: String(file?.fileName || '').trim(),
+          fileSize: file?.fileSize,
+          mimeType,
+          kind: attachmentKind(type),
+        },
+      };
+    }
+    function validMessage(message) {
+      return Boolean(message && uuid.test(message.id) && (message.text.length > 0 || message.attachment));
+    }
     const messages = [...document.querySelectorAll('.chat-message-row--opponent .chat-message')]
-      .map((node) => {
-        const id = String(node.id || '').trim();
-        const message = findMessage(node, id);
-        const senderId = String(message?.sender?.userHuid || message?.payload?.from || '').trim();
-        const type = node.getAttribute('data-message-type');
-        if (!supportedTypes.has(type)) return null;
-        const text = String(message?.payload?.body || node.querySelector('.chat-message__text')?.innerText || '').trim();
-        if (type === 'text') return { id, senderId, type, text };
-        const file = findFilePayload(message);
-        const mimeType = String(file?.fileMimeType || 'application/octet-stream').trim().toLowerCase();
-        return {
-          id,
-          senderId,
-          type,
-          text,
-          attachment: {
-            fileId: String(file?.fileId || '').trim(),
-            fileName: String(file?.fileName || '').trim(),
-            fileSize: file?.fileSize,
-            mimeType,
-            kind: attachmentKind(type),
-          },
-        };
-      })
-      .filter((message) => message && uuid.test(message.id) && (message.text.length > 0 || message.attachment));
-    const own = [...document.querySelectorAll('.chat-message__bubble--my')]
+      .map((node) => parseMessage(node, false))
+      .filter(validMessage);
+    const ownNodes = [...document.querySelectorAll('.chat-message__bubble--my')]
       .map((node) => node.closest('.chat-message'))
       .filter(Boolean);
+    const ownMessages = ownNodes.map((node) => parseMessage(node, true)).filter(validMessage);
     return {
       authenticated: Boolean(document.querySelector('.settings-button__avatar') && chatRoot),
       chatId: findChatId(chatRoot),
       chatTitle: String(titleNode?.innerText || '').split(/\r?\n/, 1)[0].trim() || null,
       composerReady: Boolean(document.querySelector('.slate-message-input[contenteditable="true"]')),
       messages,
-      lastOwnMessageId: own.length ? String(own[own.length - 1].id || '').trim() || null : null,
+      ownMessages,
+      lastOwnMessageId: ownNodes.length ? String(ownNodes[ownNodes.length - 1].id || '').trim() || null : null,
     };
   })()`;
 }
@@ -1142,6 +1212,13 @@ export class ExpressDesktopClient {
     if (!before.composerReady) {
       throw new Error("desktop message composer is unavailable");
     }
+    if (
+      !(await this.evaluate<boolean>(
+        buildDesktopComposerHasNoAttachmentsExpression(),
+      ))
+    ) {
+      throw new Error("desktop eXpress composer has pending attachments");
+    }
 
     const rpc = this.requireRpc();
     const document = await rpc.request(
@@ -1178,16 +1255,34 @@ export class ExpressDesktopClient {
       this.timeoutMs,
     );
 
+    let dispatched = false;
+    for (let attempt = 0; attempt < 50; attempt += 1) {
+      await new Promise((resolvePromise) => setTimeout(resolvePromise, 100));
+      dispatched = await this.evaluate<boolean>(
+        buildDesktopSendFileExpression(
+          file.kind,
+          basename(file.path),
+          file.size,
+        ),
+      );
+      if (dispatched) break;
+    }
+    if (!dispatched) {
+      throw new Error(
+        "desktop outbound file was not ready in the official client composer",
+      );
+    }
+
     for (let attempt = 0; attempt < 80; attempt += 1) {
       await new Promise((resolvePromise) => setTimeout(resolvePromise, 250));
       const after = await this.snapshot();
       this.assertSnapshotAllowed(after);
-      if (
-        after.lastOwnMessageId &&
-        after.lastOwnMessageId !== before.lastOwnMessageId
-      ) {
-        return after.lastOwnMessageId;
-      }
+      const messageId = confirmedDesktopOutboundFileMessageId(
+        before,
+        after,
+        file,
+      );
+      if (messageId) return messageId;
     }
     throw new Error(
       "desktop outbound file was not confirmed by the official client",

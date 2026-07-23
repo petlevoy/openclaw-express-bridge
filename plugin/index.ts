@@ -18,7 +18,7 @@ const plugin = {
     setExpressRuntime(api.runtime as Parameters<typeof setExpressRuntime>[0]);
     api.registerChannel({ plugin: expressPlugin });
     api.logger.info(
-      "eXpress channel plugin registered (BotX + desktop bridge v2.2.4; poison-event isolation active)",
+      "eXpress channel plugin registered (BotX + desktop bridge v2.2.5; verified outbound attachments active)",
     );
   },
 };

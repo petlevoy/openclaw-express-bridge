@@ -16,8 +16,10 @@ import {
   buildDesktopAttachmentChunkExpression,
   buildDesktopAttachmentStartExpression,
   buildDesktopAttachmentStatusExpression,
+  buildDesktopSendFileExpression,
   buildDesktopSnapshotExpression,
   buildDesktopTypingExpression,
+  confirmedDesktopOutboundFileMessageId,
   DESKTOP_DOCUMENT_INPUT_SELECTOR,
   DESKTOP_IMAGE_INPUT_SELECTOR,
   DESKTOP_VIDEO_INPUT_SELECTOR,
@@ -180,6 +182,7 @@ describe("eXpress desktop CDP bridge", () => {
     }
 
     const messageId = "00000000-0000-4000-8000-000000000011";
+    const ownMessageId = "00000000-0000-4000-8000-000000000010";
     const senderId = "00000000-0000-4000-8000-000000000099";
     const chatId = "00000000-0000-4000-8000-000000000088";
     const bytes = new TextEncoder().encode("%PDF-fixture");
@@ -219,6 +222,34 @@ describe("eXpress desktop CDP bridge", () => {
     Object.defineProperty(messageNode, "__reactFiber$fixture", {
       value: { memoizedProps: { message }, return: null },
     });
+
+    const ownMessageNode = new FixtureNode();
+    ownMessageNode.id = ownMessageId;
+    ownMessageNode.attributes.set("data-message-type", "document");
+    Object.defineProperty(ownMessageNode, "__reactFiber$fixture", {
+      value: {
+        memoizedProps: {
+          message: {
+            syncId: ownMessageId,
+            payload: {
+              type: "document",
+              payload: {
+                file: "/tmp/outbound.docx",
+                fileName: "outbound.docx",
+                fileSize: 35_240,
+                fileMimeType:
+                  "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+              },
+            },
+          },
+        },
+        return: null,
+      },
+    });
+    const ownBubble = {
+      closest: (selector: string) =>
+        selector === ".chat-message" ? ownMessageNode : null,
+    };
 
     const documentEntry = new FixtureNode();
     const onClick = ({ downloadToBlob }: { downloadToBlob: boolean }) => {
@@ -260,6 +291,9 @@ describe("eXpress desktop CDP bridge", () => {
         if (selector === ".chat-message-row--opponent .chat-message") {
           return [messageNode];
         }
+        if (selector === ".chat-message__bubble--my") {
+          return [ownBubble];
+        }
         return [];
       },
     };
@@ -278,6 +312,10 @@ describe("eXpress desktop CDP bridge", () => {
         text: string;
         attachment: { fileName: string; fileSize: number; mimeType: string };
       }>;
+      ownMessages: Array<{
+        id: string;
+        attachment: { fileId: string; fileName: string; fileSize: number };
+      }>;
     }>(buildDesktopSnapshotExpression());
     expect(snapshot).toMatchObject({
       chatId,
@@ -289,6 +327,16 @@ describe("eXpress desktop CDP bridge", () => {
             fileName: "KOD-128-180726.PDF",
             fileSize: bytes.length,
             mimeType: "application/pdf",
+          },
+        },
+      ],
+      ownMessages: [
+        {
+          id: ownMessageId,
+          attachment: {
+            fileId: ownMessageId,
+            fileName: "outbound.docx",
+            fileSize: 35_240,
           },
         },
       ],
@@ -926,6 +974,138 @@ describe("eXpress desktop CDP bridge", () => {
     );
     expect(desktopInputSelectorFor("image")).toBe(DESKTOP_IMAGE_INPUT_SELECTOR);
     expect(desktopInputSelectorFor("video")).toBe(DESKTOP_VIDEO_INPUT_SELECTOR);
+  });
+
+  it.each([
+    ["document", "report.docx", 17_146],
+    ["image", "preview.png", 4_308],
+  ] as const)(
+    "clicks the exact send control only after the %s attachment is selected",
+    (kind, fileName, fileSize) => {
+      let clicks = 0;
+      const input = { files: [{ name: fileName, size: fileSize }] };
+      const button = {
+        disabled: false,
+        click: () => {
+          clicks += 1;
+        },
+      };
+      const documentFixture = {
+        querySelector: (selector: string) =>
+          selector === desktopInputSelectorFor(kind) ? input : null,
+        querySelectorAll: (selector: string) => {
+          if (selector === ".message-input .input-attachment__file") {
+            return [{}];
+          }
+          if (selector === ".message-input__actions button") return [button];
+          return [];
+        },
+      };
+      const run = (name: string = fileName, size: number = fileSize) =>
+        Function(
+          "document",
+          `return (${buildDesktopSendFileExpression(kind, name, size)});`,
+        )(documentFixture) as boolean;
+
+      expect(run()).toBe(true);
+      expect(clicks).toBe(1);
+      expect(run("wrong-name")).toBe(false);
+      expect(run(fileName, fileSize + 1)).toBe(false);
+      expect(clicks).toBe(1);
+    },
+  );
+
+  it("confirms the actual new DOCX attachment instead of an unrelated own message", () => {
+    const oldId = "00000000-0000-4000-8000-000000000041";
+    const unrelatedTextId = "00000000-0000-4000-8000-000000000042";
+    const documentId = "00000000-0000-4000-8000-000000000043";
+    const before = {
+      ownMessages: [
+        {
+          id: oldId,
+          senderId: "",
+          type: "text" as const,
+          text: "before",
+        },
+      ],
+    };
+    const after = {
+      ownMessages: [
+        ...before.ownMessages,
+        {
+          id: unrelatedTextId,
+          senderId: "",
+          type: "text" as const,
+          text: "concurrent text",
+        },
+        {
+          id: documentId,
+          senderId: "",
+          type: "document" as const,
+          text: "",
+          attachment: {
+            fileId: documentId,
+            fileName: "report.docx",
+            fileSize: 17_146,
+            mimeType:
+              "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            kind: "file" as const,
+          },
+        },
+      ],
+    };
+
+    expect(
+      confirmedDesktopOutboundFileMessageId(before, after, {
+        path: "/tmp/report.docx",
+        size: 17_146,
+        kind: "document",
+      }),
+    ).toBe(documentId);
+    expect(
+      confirmedDesktopOutboundFileMessageId(before, after, {
+        path: "/tmp/other.docx",
+        size: 17_146,
+        kind: "document",
+      }),
+    ).toBeNull();
+  });
+
+  it("confirms an image only when its new attachment metadata matches", () => {
+    const imageId = "00000000-0000-4000-8000-000000000044";
+    const before = { ownMessages: [] };
+    const after = {
+      ownMessages: [
+        {
+          id: imageId,
+          senderId: "",
+          type: "image" as const,
+          text: "",
+          attachment: {
+            fileId: imageId,
+            fileName: "preview.png",
+            fileSize: 4_308,
+            mimeType: "image/png",
+            kind: "image" as const,
+          },
+        },
+      ],
+    };
+
+    expect(
+      confirmedDesktopOutboundFileMessageId(before, after, {
+        path: "/tmp/preview.png",
+        size: 4_308,
+        kind: "image",
+      }),
+    ).toBe(imageId);
+    expect(
+      confirmedDesktopOutboundFileMessageId(before, after, {
+        path: "/tmp/preview.png",
+        size: 4_309,
+        kind: "image",
+      }),
+    ).toBeNull();
   });
 
   it("accepts bounded local regular files only inside allowed roots", async () => {
