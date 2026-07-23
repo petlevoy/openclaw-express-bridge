@@ -1,17 +1,15 @@
 # openclaw-express-bridge 1.1.6
 
-Продукт для корпоратов: bridge нужен для коннекта OpenClaw с устанавливаемым на сервер мессенджером eXpress. Позволяет состыковать вашего ИИ-агента с корпоративным мессенджером.
+`openclaw-express-bridge` is an enterprise AI integration layer that connects
+OpenClaw agents to on-premises eXpress deployments through the official Linux
+desktop client. It provides a bidirectional transport between standard OpenClaw
+channel sessions and allowlisted eXpress users.
 
-`openclaw-express-bridge` is an integration for corporate users that connects
-OpenClaw to the server-deployed eXpress corporate messenger through its official
-Linux desktop client. It allows an OpenClaw ИИ-агент to exchange messages and
-supported media with approved eXpress users.
-
-The bridge provides bidirectional text, images, documents, audio and video
-within the limits documented below; exact allowlists and fail-closed outbound
-controls; a headless desktop bridge; standard OpenClaw session routing;
-filename/type/size-confirmed file delivery; and `.deb`/`.tar.gz` installers for
-Debian and Ubuntu on amd64.
+The bridge supports text, images, documents, audio and video within the limits
+documented below; native session routing; strict allowlists and fail-closed
+outbound controls; headless desktop transport; filename/type/size-confirmed file
+delivery; and reproducible `.deb`/`.tar.gz` packaging for Debian and Ubuntu on
+amd64.
 
 It runs the desktop client on an isolated Xvfb display, uses a dedicated
 profile/keyring, and exposes Chrome DevTools Protocol only on
