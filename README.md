@@ -1,5 +1,7 @@
 # openclaw-express-bridge 1.1.6
 
+Продукт для корпоратов: bridge нужен для коннекта OpenClaw с устанавливаемым на сервер мессенджером eXpress. Позволяет состыковать вашего ИИ-агента с корпоративным мессенджером.
+
 `openclaw-express-bridge` is an integration for corporate users that connects
 OpenClaw to the server-deployed eXpress corporate messenger through its official
 Linux desktop client. It allows an OpenClaw ИИ-агент to exchange messages and
