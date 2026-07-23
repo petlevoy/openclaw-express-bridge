@@ -7,10 +7,13 @@
   durable OpenClaw outbound adapter. Previous releases let the legacy
   plugin-owned text action swallow the media fields and report
   `ok: true, messageId: ""` without invoking the desktop file sender.
+- After selecting the attachment through the official client's native input,
+  the bridge clicks the client's normal send button instead of treating file
+  selection as delivery.
 - Confirms a desktop file send only after the official client exposes a new
-  own attachment with the expected filename, byte size and media kind. A
+  own attachment with the expected media kind, filename and byte size. A
   concurrent own text message can no longer produce a false successful file
-  receipt.
+  receipt, and an unconfirmed send never returns a successful `ok` result.
 
 ## 1.1.5
 

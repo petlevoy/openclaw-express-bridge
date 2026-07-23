@@ -1,10 +1,19 @@
 # openclaw-express-bridge 1.1.6
 
-An installable, fail-closed bridge between OpenClaw and the official eXpress
-Linux desktop client. It runs the client headlessly on an isolated Xvfb display,
-uses a dedicated profile/keyring, and exposes Chrome DevTools Protocol only on
-`127.0.0.1:18997`. The bundled OpenClaw channel plugin reads and sends text and
-bounded file attachments through that local desktop session.
+`openclaw-express-bridge` is an integration for corporate users that connects
+OpenClaw to the server-deployed eXpress corporate messenger through its official
+Linux desktop client. It allows an OpenClaw ИИ-агент to exchange messages and
+supported media with approved eXpress users.
+
+The bridge provides bidirectional text, images, documents, audio and video
+within the limits documented below; exact allowlists and fail-closed outbound
+controls; a headless desktop bridge; standard OpenClaw session routing;
+filename/type/size-confirmed file delivery; and `.deb`/`.tar.gz` installers for
+Debian and Ubuntu on amd64.
+
+It runs the desktop client on an isolated Xvfb display, uses a dedicated
+profile/keyring, and exposes Chrome DevTools Protocol only on
+`127.0.0.1:18997`.
 
 This is an independent integration, not an official eXpress product.
 
