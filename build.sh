@@ -35,6 +35,7 @@ copy_runtime() {
   rsync -a "$ROOT/helpers/" "$dest/helpers/"
   rsync -a "$ROOT/systemd/" "$dest/systemd/"
   rsync -a --exclude node_modules --exclude .eslintcache --exclude '*.test.ts' \
+    --exclude '*.test.js' \
     "$ROOT/plugin/" "$dest/plugin/"
   install -m 644 "$ROOT/VERSION" "$ROOT/LICENSE" "$ROOT/client.env" "$dest/"
 }
