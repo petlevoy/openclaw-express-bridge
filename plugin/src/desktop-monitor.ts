@@ -4,6 +4,7 @@ import { homedir } from "node:os";
 import { extname, join } from "node:path";
 
 import { createReplyPrefixOptions } from "openclaw/plugin-sdk/channel-runtime";
+import { isAbortRequestText } from "openclaw/plugin-sdk/reply-runtime";
 
 import { resolveExpressDesktopChats } from "./accounts.js";
 import {
@@ -69,6 +70,50 @@ interface DesktopChatRuntime {
   store: DesktopDedupeStore;
   needsBaseline: boolean;
   pendingIds: Set<string>;
+}
+
+export class DesktopActiveSessionRegistry {
+  private readonly active = new Map<string, number>();
+  private abortPromise?: Promise<void>;
+  private stopping = false;
+
+  constructor(
+    private readonly abortSession: (sessionKey: string) => Promise<void>,
+  ) {}
+
+  async run<T>(sessionKey: string, work: () => Promise<T>): Promise<T> {
+    if (this.stopping) {
+      throw new Error("eXpress desktop monitor stopped");
+    }
+    this.active.set(sessionKey, (this.active.get(sessionKey) ?? 0) + 1);
+    try {
+      return await work();
+    } finally {
+      const remaining = (this.active.get(sessionKey) ?? 1) - 1;
+      if (remaining > 0) this.active.set(sessionKey, remaining);
+      else this.active.delete(sessionKey);
+    }
+  }
+
+  async abortAll(): Promise<void> {
+    this.stopping = true;
+    this.abortPromise ??= Promise.allSettled(
+      [...this.active.keys()].map((sessionKey) =>
+        this.abortSession(sessionKey),
+      ),
+    ).then(() => undefined);
+    await this.abortPromise;
+  }
+}
+
+export function isDesktopPriorityAbortMessage(
+  message: DesktopMessage,
+): boolean {
+  return (
+    message.type === "text" &&
+    !message.attachment &&
+    isAbortRequestText(message.text)
+  );
 }
 
 /**
@@ -239,6 +284,25 @@ export async function startExpressDesktopMonitor(
   );
   const client = desktopClientFromAccount(account);
   const rateLimiter = new DesktopDispatchRateLimiter();
+  const activeSessions = new DesktopActiveSessionRegistry(
+    async (sessionKey) => {
+      const gateway = getExpressRuntime().gateway;
+      if (!(await gateway.isAvailable())) return;
+      await gateway.request(
+        "chat.abort",
+        { sessionKey, preserveSideRuns: true },
+        { timeoutMs: 5_000 },
+      );
+    },
+  );
+  const abortActiveSessions = () => {
+    void activeSessions.abortAll().catch((error) => {
+      log?.warn?.(
+        `[${account.accountId}] eXpress desktop active-run abort failed: ${redactDesktopError(error)}`,
+      );
+    });
+  };
+  abortSignal.addEventListener("abort", abortActiveSessions, { once: true });
   const scheduler = new DesktopDispatchScheduler({
     concurrency:
       account.config.desktopDispatchConcurrency ??
@@ -280,12 +344,13 @@ export async function startExpressDesktopMonitor(
             `[${account.accountId}] eXpress desktop baseline recorded chat=${runtime.chat.chatId} (${snapshot.messages.length} visible inbound ids)`,
           );
         } else {
-          queueSnapshotMessages(opts, {
+          await queueSnapshotMessages(opts, {
             runtime,
             snapshotMessages: snapshot.messages,
             scheduler,
             client,
             rateLimiter,
+            activeSessions,
           });
         }
         await sleepWithAbort(pollSliceMs, abortSignal);
@@ -301,13 +366,15 @@ export async function startExpressDesktopMonitor(
       }
     }
   } finally {
+    abortSignal.removeEventListener("abort", abortActiveSessions);
+    await activeSessions.abortAll();
     await client.withUiLock(async () => client.close());
     statusSink?.({ running: false, lastStopAt: Date.now() });
     log?.info?.(`[${account.accountId}] eXpress desktop bridge stopped`);
   }
 }
 
-function queueSnapshotMessages(
+async function queueSnapshotMessages(
   opts: ExpressMonitorOptions,
   params: {
     runtime: DesktopChatRuntime;
@@ -315,10 +382,11 @@ function queueSnapshotMessages(
     scheduler: DesktopDispatchScheduler;
     client: ReturnType<typeof desktopClientFromAccount>;
     rateLimiter: DesktopDispatchRateLimiter;
+    activeSessions: DesktopActiveSessionRegistry;
   },
-): void {
+): Promise<void> {
   const { account, abortSignal, log, statusSink } = opts;
-  const { runtime, scheduler, client, rateLimiter } = params;
+  const { runtime, scheduler, client, rateLimiter, activeSessions } = params;
   const { chat, store, pendingIds } = runtime;
   const maxMediaBytes = Math.floor(
     (account.config.mediaMaxMb ?? DEFAULT_DESKTOP_MEDIA_MAX_MB) * 1024 * 1024,
@@ -344,9 +412,23 @@ function queueSnapshotMessages(
   for (const rejected of batch.rejected) {
     if (pendingIds.has(rejected.message.id)) continue;
     pendingIds.add(rejected.message.id);
+    let claimed = false;
+    try {
+      claimed = await store.claimInbound(rejected.message.id);
+    } catch (error) {
+      pendingIds.delete(rejected.message.id);
+      throw error;
+    }
+    if (!claimed) {
+      pendingIds.delete(rejected.message.id);
+      continue;
+    }
     const accepted = scheduler.enqueue(chat.chatId, async () => {
       try {
-        if (abortSignal.aborted) return;
+        if (abortSignal.aborted) {
+          await store.releaseInboundClaim(rejected.message.id);
+          return;
+        }
         await processDesktopInboundEvent({
           message: rejected.message,
           store,
@@ -360,14 +442,81 @@ function queueSnapshotMessages(
         pendingIds.delete(rejected.message.id);
       }
     });
-    if (!accepted) pendingIds.delete(rejected.message.id);
+    if (!accepted) {
+      pendingIds.delete(rejected.message.id);
+      await store.releaseInboundClaim(rejected.message.id);
+    }
   }
 
   for (const message of batch.queued) {
     pendingIds.add(message.id);
+    let claimed = false;
+    try {
+      claimed = await store.claimInbound(message.id);
+    } catch (error) {
+      pendingIds.delete(message.id);
+      throw error;
+    }
+    if (!claimed) {
+      pendingIds.delete(message.id);
+      continue;
+    }
+
+    if (isDesktopPriorityAbortMessage(message)) {
+      const accepted = scheduler.runPriority(chat.chatId, async () => {
+        try {
+          if (abortSignal.aborted) {
+            await store.releaseInboundClaim(message.id);
+            return;
+          }
+          await processDesktopInboundEvent({
+            message,
+            store,
+            work: async () => {
+              assertDesktopMonitorActive(abortSignal);
+              const prepared = await prepareDesktopInbound(
+                opts,
+                chat,
+                message,
+                client,
+                maxMediaBytes,
+              );
+              await dispatchDesktopInbound(
+                opts,
+                chat,
+                message,
+                prepared,
+                client,
+                undefined,
+                activeSessions,
+              );
+            },
+            onDiagnostic: (outcome, attempt, diagnostic) =>
+              onDiagnostic(message, outcome, attempt, diagnostic),
+          });
+        } catch (error) {
+          await store.releaseInboundClaim(message.id);
+          throw error;
+        } finally {
+          pendingIds.delete(message.id);
+        }
+      });
+      if (!accepted) {
+        pendingIds.delete(message.id);
+        await store.releaseInboundClaim(message.id);
+        log?.warn?.(
+          `[${account.accountId}] eXpress desktop priority queue full chat=${chat.chatId}`,
+        );
+      }
+      continue;
+    }
+
     const accepted = scheduler.enqueue(chat.chatId, async () => {
       try {
-        if (abortSignal.aborted) return;
+        if (abortSignal.aborted) {
+          await store.releaseInboundClaim(message.id);
+          return;
+        }
         await withDesktopInboundAcknowledgement(
           {
             account,
@@ -402,6 +551,7 @@ function queueSnapshotMessages(
                   prepared,
                   client,
                   acknowledgement,
+                  activeSessions,
                 );
                 assertDesktopMonitorActive(abortSignal);
               },
@@ -410,12 +560,19 @@ function queueSnapshotMessages(
             });
           },
         );
+      } catch (error) {
+        // Keep the claim while dispatch is active so a reload cannot start a
+        // duplicate turn. Once dispatch has definitively failed, release it so
+        // a later poll can retry instead of suppressing the message forever.
+        await store.releaseInboundClaim(message.id);
+        throw error;
       } finally {
         pendingIds.delete(message.id);
       }
     });
     if (!accepted) {
       pendingIds.delete(message.id);
+      await store.releaseInboundClaim(message.id);
       log?.warn?.(
         `[${account.accountId}] eXpress desktop per-chat queue full chat=${chat.chatId}`,
       );
@@ -468,6 +625,7 @@ async function dispatchDesktopInbound(
   prepared: PreparedDesktopInbound,
   client: ReturnType<typeof desktopClientFromAccount>,
   acknowledgement?: DesktopAckHandle,
+  activeSessions?: DesktopActiveSessionRegistry,
 ): Promise<void> {
   const { account, abortSignal, config, log, statusSink } = opts;
   const { text, attachmentText, mediaPaths, mediaTypes } = prepared;
@@ -527,6 +685,9 @@ async function dispatchDesktopInbound(
     Surface: "express",
     MessageSid: message.id,
     MessageSidFull: message.id,
+    // Startup validated this exact chat and sender allowlist. Preserve that
+    // authorization so a priority stop reaches OpenClaw's fast-abort path.
+    CommandAuthorized: true,
     OriginatingChannel: "express",
     OriginatingTo: `express:${chat.chatId}`,
     MediaPath: mediaPaths[0],
@@ -554,71 +715,79 @@ async function dispatchDesktopInbound(
     accountId: route.accountId,
   });
 
-  await core.channel.reply.dispatchReplyWithBufferedBlockDispatcher({
-    ctx: ctxPayload,
-    cfg: config,
-    dispatcherOptions: {
-      ...prefixOptions,
-      deliver: async (payload: {
-        text?: string;
-        mediaUrls?: string[];
-        mediaUrl?: string;
-      }) => {
-        await acknowledgement?.stop();
-        assertDesktopMonitorActive(abortSignal);
-        if (!(await isDesktopOutboundUnlocked(account))) {
-          log?.info?.(
-            `[${account.accountId}] eXpress desktop reply withheld by outbound interlock`,
-          );
-          return;
-        }
-        if (payload.text?.trim()) {
-          const chunks = core.channel.text.chunkText(
-            toPlainText(payload.text).trim(),
-            account.config.textChunkLimit ?? 4000,
-          );
-          for (const chunk of chunks) {
+  const dispatch = () =>
+    core.channel.reply.dispatchReplyWithBufferedBlockDispatcher({
+      ctx: ctxPayload,
+      cfg: config,
+      dispatcherOptions: {
+        ...prefixOptions,
+        deliver: async (payload: {
+          text?: string;
+          mediaUrls?: string[];
+          mediaUrl?: string;
+        }) => {
+          await acknowledgement?.stop();
+          assertDesktopMonitorActive(abortSignal);
+          if (!(await isDesktopOutboundUnlocked(account))) {
+            log?.info?.(
+              `[${account.accountId}] eXpress desktop reply withheld by outbound interlock`,
+            );
+            return;
+          }
+          if (payload.text?.trim()) {
+            const chunks = core.channel.text.chunkText(
+              toPlainText(payload.text).trim(),
+              account.config.textChunkLimit ?? 4000,
+            );
+            for (const chunk of chunks) {
+              assertDesktopMonitorActive(abortSignal);
+              if (!(await isDesktopOutboundUnlocked(account))) {
+                throw new Error(
+                  "desktop eXpress outbound was locked during reply",
+                );
+              }
+              await replySender.sendText(chunk);
+              statusSink?.({ lastOutboundAt: Date.now() });
+            }
+          }
+          const media = payload.mediaUrls?.length
+            ? payload.mediaUrls
+            : payload.mediaUrl
+              ? [payload.mediaUrl]
+              : [];
+          for (const mediaUrl of media) {
             assertDesktopMonitorActive(abortSignal);
             if (!(await isDesktopOutboundUnlocked(account))) {
               throw new Error(
                 "desktop eXpress outbound was locked during reply",
               );
             }
-            await replySender.sendText(chunk);
+            const file = await validateDesktopOutboundFile(
+              mediaUrl,
+              account.config.mediaMaxMb ?? DEFAULT_DESKTOP_MEDIA_MAX_MB,
+              account.config.desktopMediaRoots,
+            );
+            assertDesktopMonitorActive(abortSignal);
+            if (!(await isDesktopOutboundUnlocked(account))) {
+              throw new Error(
+                "desktop eXpress outbound was locked during file validation",
+              );
+            }
+            await replySender.sendFile(file);
             statusSink?.({ lastOutboundAt: Date.now() });
           }
-        }
-        const media = payload.mediaUrls?.length
-          ? payload.mediaUrls
-          : payload.mediaUrl
-            ? [payload.mediaUrl]
-            : [];
-        for (const mediaUrl of media) {
-          assertDesktopMonitorActive(abortSignal);
-          if (!(await isDesktopOutboundUnlocked(account))) {
-            throw new Error("desktop eXpress outbound was locked during reply");
-          }
-          const file = await validateDesktopOutboundFile(
-            mediaUrl,
-            account.config.mediaMaxMb ?? DEFAULT_DESKTOP_MEDIA_MAX_MB,
-            account.config.desktopMediaRoots,
+        },
+        onError: (error, info) => {
+          log?.error?.(
+            `[${account.accountId}] ${info.kind} desktop reply failed chat=${chat.chatId}: ${redactDesktopError(error)}`,
           );
-          assertDesktopMonitorActive(abortSignal);
-          if (!(await isDesktopOutboundUnlocked(account))) {
-            throw new Error(
-              "desktop eXpress outbound was locked during file validation",
-            );
-          }
-          await replySender.sendFile(file);
-          statusSink?.({ lastOutboundAt: Date.now() });
-        }
+        },
       },
-      onError: (error, info) => {
-        log?.error?.(
-          `[${account.accountId}] ${info.kind} desktop reply failed chat=${chat.chatId}: ${redactDesktopError(error)}`,
-        );
-      },
-    },
-    replyOptions: { onModelSelected },
-  });
+      replyOptions: { onModelSelected },
+    });
+  if (activeSessions) {
+    await activeSessions.run(route.sessionKey, dispatch);
+  } else {
+    await dispatch();
+  }
 }

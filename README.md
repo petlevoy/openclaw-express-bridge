@@ -1,4 +1,4 @@
-# openclaw-express-bridge 1.1.8
+# openclaw-express-bridge 1.1.9
 
 `openclaw-express-bridge` is an enterprise AI integration layer that connects
 OpenClaw agents to on-premises eXpress deployments through the official Linux
@@ -48,7 +48,7 @@ grant was found in the client payload.
 Debian package:
 
 ```bash
-sudo apt install ./openclaw-express-bridge_1.1.8_amd64.deb
+sudo apt install ./openclaw-express-bridge_1.1.9_amd64.deb
 openclaw-express-bridge install
 openclaw-express-bridge install-client
 ```
@@ -56,8 +56,8 @@ openclaw-express-bridge install-client
 Portable archive:
 
 ```bash
-tar -xzf openclaw-express-bridge-1.1.8-linux-amd64.tar.gz
-cd openclaw-express-bridge-1.1.8
+tar -xzf openclaw-express-bridge-1.1.9-linux-amd64.tar.gz
+cd openclaw-express-bridge-1.1.9
 ./install.sh
 ~/.local/bin/openclaw-express-bridge install-client
 ```
@@ -115,7 +115,7 @@ checks what it needs but does not run a package manager.
 
 ## Multiple direct chats through one desktop session
 
-Plugin 2.3.0 adds `desktopChats`, an exact array allowlist that takes precedence
+Plugin 2.3.1 supports `desktopChats`, an exact array allowlist that takes precedence
 over the legacy `desktopChatId`, `desktopChatTitle`, `desktopSenderId` and
 `desktopSenderName` fields. One monitor and one official desktop client/CDP
 serve all enabled entries. Do not run a second monitor or desktop client against
@@ -176,6 +176,41 @@ The monitor polls chats round-robin. Desktop UI actions share one global async
 mutex, while agent work runs outside it. Each chat has a sequential bounded
 queue and its own durable dedupe/retry/quarantine state. Different chats may run
 independently, with shared model concurrency defaulting to 2.
+
+### Cancellation, reloads and long-running work
+
+A standalone OpenClaw abort request such as `/stop`, `stop` or `стоп` is a
+control-plane event. After exact chat/sender validation and a durable event
+claim, it bypasses that chat's FIFO and the shared model semaphore and enters
+OpenClaw's standard fast-abort path. Text that merely contains the word is not
+treated as a cancellation command, and attachments never use the priority path.
+
+Validated event IDs are claimed in the per-chat state file before they enter an
+in-memory queue. State mutations are serialized and published with an atomic
+file replacement. A reconnect or provider reload therefore cannot submit a
+claimed event again. The claim remains durable while dispatch is active, becomes
+a normal seen ID after success, and is released after a definitive dispatch or
+attachment failure so a later poll can retry. Claims are owned by one Gateway
+process; after a full process restart, unfinished claims are also retryable
+instead of becoming permanently lost. If the provider is stopped while dispatch
+is active, the bridge asks the Gateway to abort that exact session with a bounded
+request.
+
+OpenClaw defers every channel reload while any Gateway operation, pending reply,
+embedded run or restart-blocking background task is active. That gate is global
+and runs before a channel receives its stop signal, so the bridge cannot safely
+override it. For an intentional eXpress configuration change, first send a
+standalone abort command to the busy chat if its foreground turn must be
+cancelled, then apply the complete configuration once and perform one normal
+restart. Do not toggle `channels.express.enabled` off and on as two separate
+configuration writes.
+
+The channel does not impose a foreground turn timeout or silently convert a
+user prompt into detached work. OpenClaw agents can explicitly create a
+background task/subagent and return control to the chat; changing that semantic
+inside a transport plugin would lose the task handle and completion-delivery
+contract. Long builds, deployments and research should use that host-owned
+background mechanism.
 
 To prepare complete routing arrays for future users without reading or changing
 the active OpenClaw configuration, keep the approved non-secret chat objects in
@@ -316,7 +351,7 @@ streaming. Non-loopback CTS endpoints must use HTTPS.
 
 ## Feature scope matrix
 
-| Requirement | 1.1.8 state |
+| Requirement | 1.1.9 state |
 |---|---|
 | Native OpenClaw channel lifecycle | Implemented |
 | Default/named account configuration | Implemented; multiple chats share one serialized desktop client/CDP session |

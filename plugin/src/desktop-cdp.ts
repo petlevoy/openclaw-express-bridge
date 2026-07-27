@@ -7,6 +7,7 @@
  */
 
 import { AsyncLocalStorage } from "node:async_hooks";
+import { randomUUID } from "node:crypto";
 import {
   chmod,
   lstat,
@@ -133,9 +134,14 @@ export const DESKTOP_VIDEO_INPUT_SELECTOR =
 export const DESKTOP_TYPING_FAILSAFE_MS = 8_000;
 
 interface DedupeState {
-  version: 2 | 3 | 4;
+  version: 2 | 3 | 4 | 5;
   seen: string[];
   acknowledged?: string[];
+  /**
+   * Events claimed before they enter the in-memory scheduler. Claims are
+   * durable so a provider reload cannot submit the same event a second time.
+   */
+  claimed?: string[] | Record<string, string>;
   failures?: Record<string, number>;
   quarantined?: string[];
   updatedAt: string;
@@ -1522,26 +1528,71 @@ export class ExpressDesktopClient {
   }
 }
 
+interface DesktopDedupeCoordinator {
+  mutex: DesktopUiMutex;
+  revision: number;
+}
+
+const desktopDedupeCoordinators = new Map<string, DesktopDedupeCoordinator>();
+const desktopDedupeProcessOwner = `${process.pid}:${randomUUID()}`;
+
+function desktopDedupeCoordinatorFor(
+  statePath: string,
+): DesktopDedupeCoordinator {
+  let coordinator = desktopDedupeCoordinators.get(statePath);
+  if (!coordinator) {
+    coordinator = { mutex: new DesktopUiMutex(), revision: 0 };
+    desktopDedupeCoordinators.set(statePath, coordinator);
+  }
+  return coordinator;
+}
+
 export class DesktopDedupeStore {
   private readonly seen = new Set<string>();
   private readonly acknowledged = new Set<string>();
+  private readonly claimed = new Set<string>();
   private readonly failures = new Map<string, number>();
   private readonly quarantined = new Set<string>();
+  private readonly resolvedStatePath: string;
+  private readonly coordinator: DesktopDedupeCoordinator;
   private loaded = false;
+  private loadedRevision = -1;
 
   constructor(
-    private readonly statePath: string,
+    statePath: string,
     private readonly maxEntries = 2048,
-  ) {}
+  ) {
+    this.resolvedStatePath = resolveUserPath(statePath);
+    this.coordinator = desktopDedupeCoordinatorFor(this.resolvedStatePath);
+  }
 
   async load(): Promise<boolean> {
-    if (this.loaded) return true;
-    this.loaded = true;
+    return this.coordinator.mutex.runExclusive(async () => {
+      if (this.loaded && this.loadedRevision === this.coordinator.revision) {
+        return true;
+      }
+      return this.loadFromDiskUnlocked();
+    });
+  }
+
+  private async loadFromDiskUnlocked(): Promise<boolean> {
+    this.seen.clear();
+    this.acknowledged.clear();
+    this.claimed.clear();
+    this.failures.clear();
+    this.quarantined.clear();
     try {
       const state = JSON.parse(
-        await readFile(resolveUserPath(this.statePath), "utf8"),
+        await readFile(this.resolvedStatePath, "utf8"),
       ) as DedupeState;
-      if (state.version !== 2 && state.version !== 3 && state.version !== 4) {
+      if (
+        state.version !== 2 &&
+        state.version !== 3 &&
+        state.version !== 4 &&
+        state.version !== 5
+      ) {
+        this.loaded = true;
+        this.loadedRevision = this.coordinator.revision;
         return false;
       }
       for (const id of state.seen ?? []) this.seen.add(id);
@@ -1552,7 +1603,7 @@ export class DesktopDedupeStore {
           }
         }
       }
-      if (state.version === 4) {
+      if (state.version >= 4) {
         for (const [id, attempts] of Object.entries(state.failures ?? {})) {
           if (
             !this.seen.has(id) &&
@@ -1571,50 +1622,130 @@ export class DesktopDedupeStore {
           }
         }
       }
+      if (
+        state.version === 5 &&
+        state.claimed &&
+        !Array.isArray(state.claimed)
+      ) {
+        for (const [id, owner] of Object.entries(state.claimed)) {
+          if (
+            owner === desktopDedupeProcessOwner &&
+            !this.seen.has(id) &&
+            !this.quarantined.has(id)
+          ) {
+            this.claimed.add(id);
+          }
+        }
+      }
+      this.loaded = true;
+      this.loadedRevision = this.coordinator.revision;
       return true;
     } catch (error) {
       const code = (error as NodeJS.ErrnoException).code;
-      if (code === "ENOENT") return false;
+      if (code === "ENOENT") {
+        this.loaded = true;
+        this.loadedRevision = this.coordinator.revision;
+        return false;
+      }
       throw error;
     }
   }
 
+  private async refreshIfStaleUnlocked(): Promise<void> {
+    if (!this.loaded || this.loadedRevision !== this.coordinator.revision) {
+      await this.loadFromDiskUnlocked();
+    }
+  }
+
   has(id: string): boolean {
-    return this.seen.has(id) || this.quarantined.has(id);
+    return (
+      this.seen.has(id) || this.claimed.has(id) || this.quarantined.has(id)
+    );
   }
 
   hasAcknowledged(id: string): boolean {
     return this.acknowledged.has(id);
   }
 
+  hasInboundClaim(id: string): boolean {
+    return this.claimed.has(id);
+  }
+
+  /**
+   * Atomically reserve an inbound event before it enters any in-memory queue.
+   * A durable claim is an at-most-once hand-off marker across reload/reconnect.
+   */
+  async claimInbound(id: string): Promise<boolean> {
+    return this.coordinator.mutex.runExclusive(async () => {
+      await this.refreshIfStaleUnlocked();
+      if (
+        this.seen.has(id) ||
+        this.claimed.has(id) ||
+        this.quarantined.has(id)
+      ) {
+        return false;
+      }
+      this.claimed.add(id);
+      this.trim(this.claimed);
+      try {
+        await this.persist();
+        return true;
+      } catch (error) {
+        this.claimed.delete(id);
+        throw error;
+      }
+    });
+  }
+
+  /** Release a claim only when the event was proven not to reach dispatch. */
+  async releaseInboundClaim(id: string): Promise<void> {
+    await this.coordinator.mutex.runExclusive(async () => {
+      await this.refreshIfStaleUnlocked();
+      if (!this.claimed.delete(id)) return;
+      try {
+        await this.persist();
+      } catch (error) {
+        this.claimed.add(id);
+        throw error;
+      }
+    });
+  }
+
   /** Reserve one acknowledgement before invoking the official client. */
   async claimAcknowledgement(id: string): Promise<boolean> {
-    if (
-      this.seen.has(id) ||
-      this.quarantined.has(id) ||
-      this.acknowledged.has(id)
-    ) {
-      return false;
-    }
-    this.acknowledged.add(id);
-    this.trim(this.acknowledged);
-    try {
-      await this.persist();
-      return true;
-    } catch (error) {
-      this.acknowledged.delete(id);
-      throw error;
-    }
+    return this.coordinator.mutex.runExclusive(async () => {
+      await this.refreshIfStaleUnlocked();
+      if (
+        this.seen.has(id) ||
+        this.quarantined.has(id) ||
+        this.acknowledged.has(id)
+      ) {
+        return false;
+      }
+      this.acknowledged.add(id);
+      this.trim(this.acknowledged);
+      try {
+        await this.persist();
+        return true;
+      } catch (error) {
+        this.acknowledged.delete(id);
+        throw error;
+      }
+    });
   }
 
   async add(id: string): Promise<void> {
-    this.seen.delete(id);
-    this.seen.add(id);
-    this.acknowledged.delete(id);
-    this.failures.delete(id);
-    this.quarantined.delete(id);
-    this.trim(this.seen);
-    await this.persist();
+    await this.coordinator.mutex.runExclusive(async () => {
+      await this.refreshIfStaleUnlocked();
+      this.seen.delete(id);
+      this.seen.add(id);
+      this.claimed.delete(id);
+      this.acknowledged.delete(id);
+      this.failures.delete(id);
+      this.quarantined.delete(id);
+      this.trim(this.seen);
+      await this.persist();
+    });
   }
 
   /** Retry one poison event finitely, then durably quarantine only that id. */
@@ -1622,38 +1753,46 @@ export class DesktopDedupeStore {
     id: string,
     maxAttempts: number,
   ): Promise<DesktopFailureDisposition> {
-    if (!Number.isSafeInteger(maxAttempts) || maxAttempts < 1) {
-      throw new Error("desktop inbound retry limit is invalid");
-    }
-    if (this.seen.has(id) || this.quarantined.has(id)) {
-      return {
-        attempt: this.failures.get(id) ?? maxAttempts,
-        quarantined: true,
-      };
-    }
-    const attempt = (this.failures.get(id) ?? 0) + 1;
-    if (attempt >= maxAttempts) {
-      this.failures.delete(id);
-      this.acknowledged.delete(id);
-      this.quarantined.add(id);
-      this.trim(this.quarantined);
-    } else {
-      this.failures.set(id, attempt);
-      this.trimMap(this.failures);
-    }
-    await this.persist();
-    return { attempt, quarantined: attempt >= maxAttempts };
+    return this.coordinator.mutex.runExclusive(async () => {
+      await this.refreshIfStaleUnlocked();
+      if (!Number.isSafeInteger(maxAttempts) || maxAttempts < 1) {
+        throw new Error("desktop inbound retry limit is invalid");
+      }
+      if (this.seen.has(id) || this.quarantined.has(id)) {
+        return {
+          attempt: this.failures.get(id) ?? maxAttempts,
+          quarantined: true,
+        };
+      }
+      const attempt = (this.failures.get(id) ?? 0) + 1;
+      this.claimed.delete(id);
+      if (attempt >= maxAttempts) {
+        this.failures.delete(id);
+        this.acknowledged.delete(id);
+        this.quarantined.add(id);
+        this.trim(this.quarantined);
+      } else {
+        this.failures.set(id, attempt);
+        this.trimMap(this.failures);
+      }
+      await this.persist();
+      return { attempt, quarantined: attempt >= maxAttempts };
+    });
   }
 
   async baseline(ids: string[]): Promise<void> {
-    for (const id of ids) {
-      this.seen.add(id);
-      this.acknowledged.delete(id);
-      this.failures.delete(id);
-      this.quarantined.delete(id);
-    }
-    this.trim(this.seen);
-    await this.persist();
+    await this.coordinator.mutex.runExclusive(async () => {
+      await this.refreshIfStaleUnlocked();
+      for (const id of ids) {
+        this.seen.add(id);
+        this.claimed.delete(id);
+        this.acknowledged.delete(id);
+        this.failures.delete(id);
+        this.quarantined.delete(id);
+      }
+      this.trim(this.seen);
+      await this.persist();
+    });
   }
 
   private trim(values: Set<string>): void {
@@ -1673,15 +1812,18 @@ export class DesktopDedupeStore {
   }
 
   private async persist(): Promise<void> {
-    const path = resolveUserPath(this.statePath);
+    const path = this.resolvedStatePath;
     const directory = dirname(path);
     await mkdir(directory, { recursive: true, mode: 0o700 });
     await chmod(directory, 0o700);
-    const temporary = `${path}.${process.pid}.tmp`;
+    const temporary = `${path}.${process.pid}.${this.coordinator.revision + 1}.tmp`;
     const state: DedupeState = {
-      version: 4,
+      version: 5,
       seen: [...this.seen],
       acknowledged: [...this.acknowledged],
+      claimed: Object.fromEntries(
+        [...this.claimed].map((id) => [id, desktopDedupeProcessOwner]),
+      ),
       failures: Object.fromEntries(this.failures),
       quarantined: [...this.quarantined],
       updatedAt: new Date().toISOString(),
@@ -1691,6 +1833,8 @@ export class DesktopDedupeStore {
     });
     await chmod(temporary, 0o600);
     await rename(temporary, path);
+    this.coordinator.revision += 1;
+    this.loadedRevision = this.coordinator.revision;
   }
 }
 

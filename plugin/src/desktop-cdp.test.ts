@@ -1359,6 +1359,98 @@ describe("eXpress desktop CDP bridge", () => {
     expect(third.hasAcknowledged("message-one")).toBe(false);
   });
 
+  it("atomically persists one inbound claim across reloads", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "express-claim-test-"));
+    const statePath = join(directory, "state.json");
+    const first = new DesktopDedupeStore(statePath, 10);
+    expect(await first.load()).toBe(false);
+
+    const claims = await Promise.all([
+      first.claimInbound("message-one"),
+      first.claimInbound("message-one"),
+      first.claimInbound("message-one"),
+    ]);
+    expect(claims.filter(Boolean)).toHaveLength(1);
+
+    const second = new DesktopDedupeStore(statePath, 10);
+    expect(await second.load()).toBe(true);
+    expect(second.hasInboundClaim("message-one")).toBe(true);
+    expect(await second.claimInbound("message-one")).toBe(false);
+
+    const raw = JSON.parse(await readFile(statePath, "utf8")) as {
+      version: number;
+      claimed: Record<string, string>;
+    };
+    expect(raw.version).toBe(5);
+    expect(Object.keys(raw.claimed)).toEqual(["message-one"]);
+    expect(raw.claimed["message-one"]).toBeTypeOf("string");
+
+    await second.releaseInboundClaim("message-one");
+    const third = new DesktopDedupeStore(statePath, 10);
+    expect(await third.load()).toBe(true);
+    expect(await third.claimInbound("message-one")).toBe(true);
+  });
+
+  it("serializes claims from overlapping store instances", async () => {
+    const directory = await mkdtemp(
+      join(tmpdir(), "express-overlap-claim-test-"),
+    );
+    const statePath = join(directory, "state.json");
+    const first = new DesktopDedupeStore(statePath, 10);
+    const reloaded = new DesktopDedupeStore(statePath, 10);
+    expect(await first.load()).toBe(false);
+    expect(await reloaded.load()).toBe(false);
+
+    const claims = await Promise.all([
+      first.claimInbound("message-one"),
+      reloaded.claimInbound("message-one"),
+    ]);
+    expect(claims.filter(Boolean)).toHaveLength(1);
+
+    const persisted = new DesktopDedupeStore(statePath, 10);
+    expect(await persisted.load()).toBe(true);
+    expect(persisted.hasInboundClaim("message-one")).toBe(true);
+  });
+
+  it("retries old acknowledgements and claims from a previous process", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "express-v4-claim-test-"));
+    const v4StatePath = join(directory, "v4-state.json");
+    await writeFile(
+      v4StatePath,
+      JSON.stringify({
+        version: 4,
+        seen: [],
+        acknowledged: ["possibly-dispatched", "poison-retry"],
+        failures: { "poison-retry": 1 },
+        quarantined: [],
+        updatedAt: new Date(0).toISOString(),
+      }),
+    );
+
+    const v4Store = new DesktopDedupeStore(v4StatePath, 10);
+    expect(await v4Store.load()).toBe(true);
+    expect(v4Store.has("possibly-dispatched")).toBe(false);
+    expect(v4Store.has("poison-retry")).toBe(false);
+
+    const staleStatePath = join(directory, "stale-v5-state.json");
+    await writeFile(
+      staleStatePath,
+      JSON.stringify({
+        version: 5,
+        seen: [],
+        acknowledged: [],
+        claimed: { "stale-claim": "previous-process" },
+        failures: {},
+        quarantined: [],
+        updatedAt: new Date(0).toISOString(),
+      }),
+    );
+    const restartedStore = new DesktopDedupeStore(staleStatePath, 10);
+    expect(await restartedStore.load()).toBe(true);
+    expect(restartedStore.has("stale-claim")).toBe(false);
+    expect(await restartedStore.claimInbound("stale-claim")).toBe(true);
+  });
+
   it("durably retries one failed event and quarantines only that id", async () => {
     const directory = await mkdtemp(join(tmpdir(), "express-retry-test-"));
     const statePath = join(directory, "state.json");
@@ -1394,7 +1486,7 @@ describe("eXpress desktop CDP bridge", () => {
       quarantined: string[];
     };
     expect(raw).toMatchObject({
-      version: 4,
+      version: 5,
       seen: ["healthy-two"],
       failures: {},
       quarantined: ["poison-one"],

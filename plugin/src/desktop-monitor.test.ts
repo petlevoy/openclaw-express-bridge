@@ -6,8 +6,10 @@ import { describe, expect, it, vi } from "vitest";
 
 import { DesktopDedupeStore, type DesktopMessage } from "./desktop-cdp.js";
 import {
+  DesktopActiveSessionRegistry,
   DesktopInboundAttachmentError,
   desktopStatePathForChat,
+  isDesktopPriorityAbortMessage,
   processDesktopInboundEvent,
   validateDesktopExactAllowlist,
 } from "./desktop-monitor.js";
@@ -22,6 +24,63 @@ const message = (suffix: string, type: DesktopMessage["type"] = "document") =>
   }) satisfies DesktopMessage;
 
 describe("desktop inbound event isolation", () => {
+  it("recognizes only standalone text abort commands as priority events", () => {
+    expect(
+      isDesktopPriorityAbortMessage({
+        ...message("10", "text"),
+        text: "стоп",
+      }),
+    ).toBe(true);
+    expect(
+      isDesktopPriorityAbortMessage({
+        ...message("11", "text"),
+        text: "/stop",
+      }),
+    ).toBe(true);
+    expect(
+      isDesktopPriorityAbortMessage({
+        ...message("12", "text"),
+        text: "стоп, потом продолжай",
+      }),
+    ).toBe(false);
+    expect(
+      isDesktopPriorityAbortMessage({
+        ...message("13", "document"),
+        text: "стоп",
+        attachment: {
+          fileId: "00000000-0000-4000-8000-000000000013",
+          fileName: "stop.pdf",
+          fileSize: 10,
+          mimeType: "application/pdf",
+          kind: "file",
+        },
+      }),
+    ).toBe(false);
+  });
+
+  it("aborts each active session once when the monitor stops", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolvePromise) => {
+      release = resolvePromise;
+    });
+    const aborted: string[] = [];
+    const registry = new DesktopActiveSessionRegistry(async (sessionKey) => {
+      aborted.push(sessionKey);
+    });
+    const first = registry.run("agent:test:express:direct:user", () => gate);
+    const second = registry.run("agent:test:express:direct:user", () => gate);
+
+    await registry.abortAll();
+    await registry.abortAll();
+    expect(aborted).toEqual(["agent:test:express:direct:user"]);
+    await expect(
+      registry.run("agent:test:express:direct:other", async () => {}),
+    ).rejects.toThrow("monitor stopped");
+
+    release();
+    await Promise.all([first, second]);
+  });
+
   it("separates durable state by chat without changing the legacy path", () => {
     const base = "/tmp/express-state.json";
     expect(desktopStatePathForChat(base, "default", "chat-a", false)).toBe(
@@ -146,5 +205,24 @@ describe("desktop inbound event isolation", () => {
       }),
     ).rejects.toThrow("desktop CDP connection closed");
     expect(store.has(inbound.id)).toBe(false);
+  });
+
+  it("completes a durable inbound claim after successful dispatch", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "express-claim-test-"));
+    const store = new DesktopDedupeStore(join(directory, "state.json"));
+    await store.load();
+    const inbound = message("5", "text");
+
+    await expect(store.claimInbound(inbound.id)).resolves.toBe(true);
+    expect(store.hasInboundClaim(inbound.id)).toBe(true);
+    await expect(
+      processDesktopInboundEvent({
+        message: inbound,
+        store,
+        work: async () => {},
+      }),
+    ).resolves.toBe("delivered");
+    expect(store.has(inbound.id)).toBe(true);
+    expect(store.hasInboundClaim(inbound.id)).toBe(false);
   });
 });

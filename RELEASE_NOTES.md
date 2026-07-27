@@ -1,5 +1,31 @@
 # Release notes
 
+## 1.1.9
+
+- Ships eXpress plugin 2.3.1 with priority cancellation and reload-safe inbound
+  claims for the multi-chat desktop bridge.
+
+- Handles standalone `/stop`, `stop`, `стоп` and the other OpenClaw abort
+  phrases as priority control events. They bypass the busy chat's normal FIFO
+  and shared model semaphore, then enter OpenClaw's standard fast-abort path, so
+  cancellation does not wait behind the turn it must interrupt.
+- Durably claims each validated inbound message before placing it in an
+  in-memory queue. Version-5 state is serialized by a per-state-path mutex and
+  replaced atomically; reload/reconnect can no longer submit the same claimed
+  event twice while its dispatch is active. Claims become normal seen IDs after
+  success and are released after a definitive dispatch or attachment failure.
+  Process-owned claims survive provider reloads but become retryable after a
+  full Gateway process restart, preventing permanent loss.
+- Tracks active OpenClaw session keys and requests bounded `chat.abort` cleanup
+  when the desktop provider is stopped. This prevents channel shutdown from
+  leaving its own agent turn running after the CDP monitor has closed.
+- Documents the OpenClaw-wide reload deferral boundary and the supported
+  detached-work contract. The bridge does not silently transform arbitrary
+  foreground prompts into background tasks.
+- Adds regression coverage for priority cancellation, durable claim recovery,
+  concurrent cross-instance claim serialization and active-session shutdown.
+  The test suite performs no live eXpress send.
+
 ## 1.1.8
 
 - Ships eXpress plugin 2.3.0 with backward-compatible `desktopChats` support for
