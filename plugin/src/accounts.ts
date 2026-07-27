@@ -8,7 +8,7 @@ import {
   normalizeAccountId,
 } from "openclaw/plugin-sdk/core";
 
-import type { ExpressAccountConfig } from "./types.js";
+import type { DesktopChatConfig, ExpressAccountConfig } from "./types.js";
 
 export interface ResolvedExpressAccount {
   accountId: string;
@@ -111,6 +111,9 @@ export function resolveExpressAccount(params: {
       desktopChatTitle: section.desktopChatTitle as string | undefined,
       desktopSenderId: section.desktopSenderId as string | undefined,
       desktopSenderName: section.desktopSenderName as string | undefined,
+      desktopChats: section.desktopChats as DesktopChatConfig[] | undefined,
+      desktopDispatchConcurrency: section.desktopDispatchConcurrency as
+        number | undefined,
       desktopPollIntervalMs: section.desktopPollIntervalMs as
         number | undefined,
       desktopStatePath: section.desktopStatePath as string | undefined,
@@ -146,6 +149,9 @@ export function resolveExpressAccount(params: {
       desktopChatTitle: raw.desktopChatTitle as string | undefined,
       desktopSenderId: raw.desktopSenderId as string | undefined,
       desktopSenderName: raw.desktopSenderName as string | undefined,
+      desktopChats: raw.desktopChats as DesktopChatConfig[] | undefined,
+      desktopDispatchConcurrency: raw.desktopDispatchConcurrency as
+        number | undefined,
       desktopPollIntervalMs: raw.desktopPollIntervalMs as number | undefined,
       desktopStatePath: raw.desktopStatePath as string | undefined,
       desktopOutboundEnabled: raw.desktopOutboundEnabled as boolean | undefined,
@@ -167,9 +173,10 @@ export function resolveExpressAccount(params: {
     mode === "desktop"
       ? Boolean(
           accountConfig.desktopCdpUrl?.trim() &&
-          accountConfig.desktopChatId?.trim() &&
-          accountConfig.desktopChatTitle?.trim() &&
-          accountConfig.desktopSenderId?.trim(),
+          (accountConfig.desktopChats?.some((chat) => chat.enabled !== false) ||
+            (accountConfig.desktopChatId?.trim() &&
+              accountConfig.desktopChatTitle?.trim() &&
+              accountConfig.desktopSenderId?.trim())),
         )
       : Boolean(botId.trim() && secretKey.trim() && ctsUrl.trim());
   const enabled = accountConfig.enabled ?? true;
@@ -186,4 +193,39 @@ export function resolveExpressAccount(params: {
     webhookPort,
     config: accountConfig,
   };
+}
+
+/**
+ * Resolve the exact desktop chat allowlist. The array form takes precedence;
+ * legacy single-chat fields are converted only when desktopChats is absent.
+ */
+export function resolveExpressDesktopChats(
+  account: ResolvedExpressAccount,
+): DesktopChatConfig[] {
+  if (account.config.desktopChats) {
+    return account.config.desktopChats
+      .filter((chat) => chat.enabled !== false)
+      .map((chat) => ({
+        ...chat,
+        chatId: chat.chatId.toLowerCase(),
+        senderId: chat.senderId.toLowerCase(),
+        chatTitle: chat.chatTitle.trim(),
+        senderName: chat.senderName?.trim(),
+      }));
+  }
+  const {
+    desktopChatId: chatId,
+    desktopChatTitle: chatTitle,
+    desktopSenderId: senderId,
+    desktopSenderName: senderName,
+  } = account.config;
+  if (!chatId || !chatTitle || !senderId) return [];
+  return [
+    {
+      chatId: chatId.toLowerCase(),
+      chatTitle: chatTitle.trim(),
+      senderId: senderId.toLowerCase(),
+      senderName: senderName?.trim(),
+    },
+  ];
 }

@@ -175,6 +175,7 @@ describe("eXpress desktop safety controls", () => {
       "application/vnd.openxmlformats-officedocument.presentationml.presentation",
     ],
     ["image", "photo.jpg", "image/jpeg"],
+    ["image", "screenshot_2026-07-27 07:38:47 +0000", "image/jpeg"],
     ["audio", "clip.m4a", "audio/mp4"],
     ["voice", "voice.m4a", "audio/m4a"],
     ["video", "clip.mp4", "video/mp4"],
@@ -205,6 +206,36 @@ describe("eXpress desktop safety controls", () => {
         "application/octet-stream",
       ),
     ).toBe(false);
+    expect(
+      isDesktopAttachmentMetadataCompatible(
+        "image",
+        "extensionless screenshot",
+        "image/svg+xml",
+      ),
+    ).toBe(false);
+  });
+
+  it("does not revalidate or relog an already quarantined attachment", () => {
+    const quarantined = {
+      id: id("9"),
+      senderId,
+      type: "image" as const,
+      text: "",
+      attachment: {
+        fileId: id("9"),
+        fileName: "extensionless screenshot",
+        fileSize: 512,
+        mimeType: "application/octet-stream",
+        kind: "image" as const,
+      },
+    };
+    expect(
+      selectDesktopInboundBatchResilient(
+        [quarantined],
+        (messageId) => messageId === quarantined.id,
+        limits,
+      ),
+    ).toEqual({ queued: [], rejected: [] });
   });
 
   it("reserves sequential rate-limited dispatch slots", () => {

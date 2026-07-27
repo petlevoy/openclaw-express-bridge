@@ -25,6 +25,8 @@ import {
   DESKTOP_VIDEO_INPUT_SELECTOR,
   DesktopDedupeStore,
   desktopInputSelectorFor,
+  DesktopUiMutex,
+  ExpressDesktopClient,
   isDesktopAttachmentMimeCompatible,
   isDesktopOutboundUnlocked,
   normalizeLoopbackCdpSocketUrl,
@@ -33,6 +35,62 @@ import {
 } from "./desktop-cdp.js";
 
 describe("eXpress desktop CDP bridge", () => {
+  it("serializes all shared desktop UI work", async () => {
+    const mutex = new DesktopUiMutex();
+    const events: string[] = [];
+    let release!: () => void;
+    const gate = new Promise<void>((resolvePromise) => {
+      release = resolvePromise;
+    });
+    const first = mutex.runExclusive(async () => {
+      events.push("first-start");
+      await gate;
+      events.push("first-end");
+    });
+    const second = mutex.runExclusive(async () => {
+      events.push("second");
+    });
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 0));
+    expect(events).toEqual(["first-start"]);
+    release();
+    await Promise.all([first, second]);
+    expect(events).toEqual(["first-start", "first-end", "second"]);
+  });
+
+  it("requires an exact UUID and title for every configured target", async () => {
+    const chatId = "00000000-0000-4000-8000-000000000001";
+    const otherChatId = "00000000-0000-4000-8000-000000000002";
+    const client = new ExpressDesktopClient({
+      cdpUrl: "http://127.0.0.1:18997",
+      chats: [
+        { chatId, chatTitle: "Alice" },
+        { chatId: otherChatId, chatTitle: "Bob" },
+      ],
+    });
+    const snapshot = {
+      authenticated: true,
+      chatId,
+      chatTitle: "Alice",
+      composerReady: true,
+      messages: [],
+      ownMessages: [],
+      lastOwnMessageId: null,
+    };
+    expect(() => client.assertSnapshotAllowed(snapshot, chatId)).not.toThrow();
+    expect(() =>
+      client.assertSnapshotAllowed(
+        { ...snapshot, chatTitle: "Lookalike" },
+        chatId,
+      ),
+    ).toThrow(/title/);
+    expect(() => client.assertSnapshotAllowed(snapshot, otherChatId)).toThrow(
+      /UUID/,
+    );
+    await expect(
+      client.sendText("00000000-0000-4000-8000-000000000099", "blocked"),
+    ).rejects.toThrow(/not allowlisted/);
+  });
+
   it("accepts only loopback CDP endpoints", () => {
     expect(normalizeLoopbackCdpUrl("http://127.0.0.1:18997/")).toBe(
       "http://127.0.0.1:18997",
@@ -764,6 +822,7 @@ describe("eXpress desktop CDP bridge", () => {
       }
 
       const messageId = `00000000-0000-4000-8000-0000000000${suffix}`;
+      const attachmentMessageId = `10000000-0000-4000-8000-0000000000${suffix}`;
       const senderId = "00000000-0000-4000-8000-000000000099";
       const chatId = "00000000-0000-4000-8000-000000000088";
       const bytes = new TextEncoder().encode(`${type}-${suffix}`);
@@ -798,8 +857,13 @@ describe("eXpress desktop CDP bridge", () => {
       const attachmentMessage = {
         type,
         syncId: messageId,
-        msgId: messageId,
+        msgId: attachmentMessageId,
         payload: filePayload,
+      };
+      const downloadedFilePayload = { ...filePayload };
+      const downloadedAttachmentMessage = {
+        ...attachmentMessage,
+        payload: downloadedFilePayload,
       };
       const loadedMessages: unknown[] = [];
       const exactLoader = ({
@@ -810,7 +874,9 @@ describe("eXpress desktop CDP bridge", () => {
         downloadToBlob: boolean;
       }) => {
         loadedMessages.push(message);
-        if (downloadToBlob) filePayload.fileBlob = `blob:file:${suffix}`;
+        if (downloadToBlob) {
+          downloadedFilePayload.fileBlob = `blob:file:${suffix}`;
+        }
       };
       const wrongEnvelopeLoader = ({ message }: { message: unknown }) => {
         throw new Error(`wrong envelope loader selected: ${String(message)}`);
@@ -835,6 +901,14 @@ describe("eXpress desktop CDP bridge", () => {
           memoizedProps: {
             message: attachmentMessage,
             loadAttachment: exactLoader,
+          },
+          alternate: {
+            elementType: { name: "MessageEntryBody" },
+            memoizedProps: {
+              message: downloadedAttachmentMessage,
+              loadAttachment: exactLoader,
+            },
+            return: null,
           },
           return: null,
         },

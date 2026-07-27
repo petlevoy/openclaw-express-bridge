@@ -91,6 +91,106 @@ describe("Config Schema", () => {
         }).success,
       ).toBe(false);
     });
+
+    it("accepts an exact multi-chat allowlist", () => {
+      const result = ExpressAccountSchema.safeParse({
+        mode: "desktop",
+        desktopChats: [
+          {
+            chatId: "00000000-0000-4000-8000-000000000001",
+            chatTitle: "Alice",
+            senderId: "00000000-0000-4000-8000-000000000011",
+            senderName: "Alice Example",
+          },
+          {
+            chatId: "00000000-0000-4000-8000-000000000002",
+            chatTitle: "Bob",
+            senderId: "00000000-0000-4000-8000-000000000022",
+            enabled: true,
+          },
+        ],
+        desktopDispatchConcurrency: 2,
+      });
+      expect(result.success).toBe(true);
+    });
+
+    it("accepts canonical eXpress UUID-shaped ids without RFC variant bits", () => {
+      expect(
+        ExpressAccountSchema.safeParse({
+          desktopChats: [
+            {
+              chatId: "11111111-2222-0333-4444-555555555555",
+              chatTitle: "First Example",
+              senderId: "66666666-7777-0888-3999-aaaaaaaaaaaa",
+            },
+            {
+              chatId: "bbbbbbbb-cccc-0ddd-3eee-ffffffffffff",
+              chatTitle: "Second Example",
+              senderId: "12345678-9abc-0def-3456-789abcdef012",
+            },
+          ],
+        }).success,
+      ).toBe(true);
+    });
+
+    it("rejects duplicate or malformed multi-chat identities", () => {
+      const duplicateChatId = ExpressAccountSchema.safeParse({
+        desktopChats: [
+          {
+            chatId: "00000000-0000-4000-8000-000000000001",
+            chatTitle: "Alice",
+            senderId: "00000000-0000-4000-8000-000000000011",
+          },
+          {
+            chatId: "00000000-0000-4000-8000-000000000001",
+            chatTitle: "Mallory",
+            senderId: "00000000-0000-4000-8000-000000000022",
+          },
+        ],
+      });
+      expect(duplicateChatId.success).toBe(false);
+      const duplicateSenderId = ExpressAccountSchema.safeParse({
+        desktopChats: [
+          {
+            chatId: "00000000-0000-4000-8000-000000000001",
+            chatTitle: "Alice",
+            senderId: "00000000-0000-4000-8000-000000000011",
+          },
+          {
+            chatId: "00000000-0000-4000-8000-000000000002",
+            chatTitle: "Bob",
+            senderId: "00000000-0000-4000-8000-000000000011",
+          },
+        ],
+      });
+      expect(duplicateSenderId.success).toBe(false);
+      const duplicateChatTitle = ExpressAccountSchema.safeParse({
+        desktopChats: [
+          {
+            chatId: "00000000-0000-4000-8000-000000000001",
+            chatTitle: "Alice",
+            senderId: "00000000-0000-4000-8000-000000000011",
+          },
+          {
+            chatId: "00000000-0000-4000-8000-000000000002",
+            chatTitle: " Alice ",
+            senderId: "00000000-0000-4000-8000-000000000022",
+          },
+        ],
+      });
+      expect(duplicateChatTitle.success).toBe(false);
+      expect(
+        ExpressAccountSchema.safeParse({
+          desktopChats: [
+            {
+              chatId: "not-a-uuid",
+              chatTitle: "Alice",
+              senderId: "also-not-a-uuid",
+            },
+          ],
+        }).success,
+      ).toBe(false);
+    });
   });
 
   describe("ExpressConfigSchema", () => {

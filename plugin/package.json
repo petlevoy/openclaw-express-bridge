@@ -1,6 +1,6 @@
 {
   "name": "openclaw-express",
-  "version": "2.2.5",
+  "version": "2.3.0",
   "description": "eXpress channel for OpenClaw — BotX or official Linux desktop bridge",
   "license": "MIT",
   "type": "module",
@@ -12,7 +12,7 @@
     "lint:fix": "eslint src/ --fix",
     "format": "prettier --write \"src/**/*.ts\"",
     "format:check": "prettier --check \"src/**/*.ts\"",
-    "test": "vitest run",
+    "test": "vitest run --pool=threads --maxWorkers=1",
     "test:watch": "vitest"
   },
   "openclaw": {

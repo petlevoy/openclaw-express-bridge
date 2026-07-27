@@ -26,6 +26,7 @@ import {
   listExpressAccountIds,
   type ResolvedExpressAccount,
   resolveExpressAccount,
+  resolveExpressDesktopChats,
 } from "./accounts.js";
 import { expressMessageActions } from "./actions.js";
 import { ExpressConfigSchema } from "./config-schema.js";
@@ -193,6 +194,13 @@ export const expressPlugin: ChannelPlugin<ResolvedExpressAccount> = {
     },
     listPeers: async ({ cfg, accountId }) => {
       const account = resolveExpressAccount({ cfg, accountId });
+      if (account.mode === "desktop") {
+        return resolveExpressDesktopChats(account).map((chat) => ({
+          kind: "user" as const,
+          id: chat.senderId,
+          name: chat.senderName,
+        }));
+      }
       const allowFrom = account.config.allowFrom ?? [];
       return allowFrom.map((id: string) => ({
         kind: "user" as const,
@@ -200,8 +208,15 @@ export const expressPlugin: ChannelPlugin<ResolvedExpressAccount> = {
         name: undefined,
       }));
     },
-    listGroups: async () => {
-      // BotX doesn't expose a chat list API
+    listGroups: async ({ cfg, accountId }) => {
+      const account = resolveExpressAccount({ cfg, accountId });
+      if (account.mode === "desktop") {
+        return resolveExpressDesktopChats(account).map((chat) => ({
+          kind: "group" as const,
+          id: chat.chatId,
+          name: chat.chatTitle,
+        }));
+      }
       return [];
     },
   },
@@ -419,7 +434,7 @@ export const expressPlugin: ChannelPlugin<ResolvedExpressAccount> = {
             accountId: snapshot.accountId,
             kind: "config" as const,
             message: "eXpress transport not configured",
-            fix: "Configure BotX credentials or the desktop CDP/chat allowlist fields",
+            fix: "Configure BotX credentials or desktopCdpUrl plus desktopChats (legacy single-chat fields also remain supported)",
           });
         }
       }

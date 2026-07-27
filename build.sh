@@ -29,11 +29,12 @@ echo "== plugin: deterministic npm install and verification =="
 
 copy_runtime() {
   local dest=$1
-  mkdir -p "$dest"/{bin,lib,helpers,systemd,plugin}
+  mkdir -p "$dest"/{bin,lib,helpers,systemd,plugin,tools}
   rsync -a "$ROOT/bin/" "$dest/bin/"
   rsync -a "$ROOT/lib/" "$dest/lib/"
   rsync -a "$ROOT/helpers/" "$dest/helpers/"
   rsync -a "$ROOT/systemd/" "$dest/systemd/"
+  rsync -a "$ROOT/tools/" "$dest/tools/"
   rsync -a --exclude node_modules --exclude .eslintcache --exclude '*.test.ts' \
     --exclude '*.test.js' \
     "$ROOT/plugin/" "$dest/plugin/"
@@ -49,6 +50,8 @@ normalize_tree() {
     -path '*/bin/openclaw-express-bridge' -o \
     -path '*/lib/express-keyring-service.sh' -o \
     -path '*/helpers/cdp-screenshot.mjs' -o \
+    -path '*/tools/generate-desktop-routing.mjs' -o \
+    -path '*/tools/create-isolated-agent.mjs' -o \
     -name install.sh -o -name uninstall.sh \) -exec chmod 755 {} +
   find "$tree" -type f -name eXpress.AppImage -exec chmod 700 {} +
 }

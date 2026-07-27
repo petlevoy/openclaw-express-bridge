@@ -6,6 +6,7 @@
  * desktopOutboundEnabled=true and the presence of a local switch file.
  */
 
+import { AsyncLocalStorage } from "node:async_hooks";
 import {
   chmod,
   lstat,
@@ -29,7 +30,10 @@ import {
 } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import type { ResolvedExpressAccount } from "./accounts.js";
+import {
+  type ResolvedExpressAccount,
+  resolveExpressDesktopChats,
+} from "./accounts.js";
 
 interface CdpTarget {
   type?: string;
@@ -86,9 +90,16 @@ export interface DesktopSnapshot {
 
 export interface DesktopClientConfig {
   cdpUrl: string;
+  /** Legacy single-chat constructor fields. */
+  chatId?: string;
+  chatTitle?: string;
+  chats?: DesktopChatTarget[];
+  timeoutMs?: number;
+}
+
+export interface DesktopChatTarget {
   chatId: string;
   chatTitle: string;
-  timeoutMs?: number;
 }
 
 export interface DesktopOutboundFile {
@@ -133,6 +144,42 @@ interface DedupeState {
 export interface DesktopFailureDisposition {
   attempt: number;
   quarantined: boolean;
+}
+
+/**
+ * Re-entrant promise mutex. A single instance is shared by all clients for
+ * the same loopback CDP endpoint so monitor polling, acknowledgements and
+ * ad-hoc outbound sends can never race the desktop UI.
+ */
+export class DesktopUiMutex {
+  private tail: Promise<void> = Promise.resolve();
+  private readonly context = new AsyncLocalStorage<boolean>();
+
+  async runExclusive<T>(work: () => Promise<T>): Promise<T> {
+    if (this.context.getStore()) return work();
+    const previous = this.tail;
+    let release!: () => void;
+    this.tail = new Promise<void>((resolvePromise) => {
+      release = resolvePromise;
+    });
+    await previous;
+    try {
+      return await this.context.run(true, work);
+    } finally {
+      release();
+    }
+  }
+}
+
+const desktopUiMutexes = new Map<string, DesktopUiMutex>();
+
+function desktopUiMutexFor(cdpUrl: string): DesktopUiMutex {
+  let mutex = desktopUiMutexes.get(cdpUrl);
+  if (!mutex) {
+    mutex = new DesktopUiMutex();
+    desktopUiMutexes.set(cdpUrl, mutex);
+  }
+  return mutex;
 }
 
 function resolveUserPath(value: string): string {
@@ -715,6 +762,7 @@ function buildAttachmentLookupExpression(messageId: string): string {
   const expected = JSON.stringify(messageId);
   return `(() => {
     const expected = ${expected};
+    const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
     const node = document.getElementById(expected);
     const supportedTypes = new Set(['document', 'image', 'audio', 'voice', 'video']);
     if (!node || !supportedTypes.has(node.getAttribute('data-message-type')) || !node.closest('.chat-message-row--opponent')) return null;
@@ -729,20 +777,63 @@ function buildAttachmentLookupExpression(messageId: string): string {
     const addUnique = (values, value) => {
       if (value && !values.includes(value)) values.push(value);
     };
+    const attachmentFilePayload = (value) => [
+      value?.payload?.payload,
+      value?.payload?.file,
+      value?.payload,
+    ].find((candidate) =>
+      candidate &&
+      typeof candidate === 'object' &&
+      typeof candidate.fileId === 'string' &&
+      typeof candidate.fileName === 'string' &&
+      Number.isSafeInteger(candidate.fileSize),
+    ) || null;
+    const matchesAttachmentEnvelope = (candidate) => {
+      const outerFile = attachmentFilePayload(message);
+      const innerFile = attachmentFilePayload(candidate);
+      return Boolean(
+        outerFile &&
+        innerFile &&
+        innerFile.fileId === outerFile.fileId &&
+        innerFile.fileName === outerFile.fileName &&
+        innerFile.fileSize === outerFile.fileSize &&
+        String(innerFile.fileMimeType || 'application/octet-stream').trim().toLowerCase() ===
+          String(outerFile.fileMimeType || 'application/octet-stream').trim().toLowerCase()
+      );
+    };
     for (let index = 0; fiber && index < 30; index += 1, fiber = fiber.return) {
-      const props = fiber.memoizedProps;
-      if (props?.message?.syncId === expected) {
-        message ||= props.message;
-        addUnique(messages, props.message);
-        if (props.message?.msgId === expected) {
-          attachmentMessage ||= props.message;
-          addUnique(attachmentMessages, props.message);
-          if (typeof props.loadAttachment === 'function') {
+      for (const candidateFiber of [fiber, fiber.alternate].filter(Boolean)) {
+        const props = candidateFiber.memoizedProps;
+        if (props?.message?.syncId === expected) {
+          message ||= props.message;
+          addUnique(messages, props.message);
+          const componentName = String(
+            candidateFiber.elementType?.displayName ||
+            candidateFiber.elementType?.name ||
+            candidateFiber.type?.displayName ||
+            candidateFiber.type?.name ||
+            '',
+          );
+          if (
+            typeof props.message?.msgId === 'string' &&
+            uuid.test(props.message.msgId) &&
+            matchesAttachmentEnvelope(props.message)
+          ) {
+            addUnique(attachmentMessages, props.message);
+          }
+          if (
+            componentName === 'MessageEntryBody' &&
+            typeof props.message?.msgId === 'string' &&
+            uuid.test(props.message.msgId) &&
+            matchesAttachmentEnvelope(props.message) &&
+            typeof props.loadAttachment === 'function'
+          ) {
+            attachmentMessage ||= props.message;
             attachmentLoadAttachment ||= props.loadAttachment;
           }
-        }
-        if (typeof props.loadAttachment === 'function') {
-          envelopeLoadAttachment ||= props.loadAttachment;
+          if (typeof props.loadAttachment === 'function') {
+            envelopeLoadAttachment ||= props.loadAttachment;
+          }
         }
       }
     }
@@ -752,35 +843,43 @@ function buildAttachmentLookupExpression(messageId: string): string {
       const descendantFiberKey = Object.getOwnPropertyNames(descendant).find((key) => key.startsWith('__reactFiber$'));
       let descendantFiber = descendantFiberKey ? descendant[descendantFiberKey] : null;
       for (let index = 0; descendantFiber && index < 15; index += 1, descendantFiber = descendantFiber.return) {
-        const props = descendantFiber.memoizedProps;
-        const componentName = String(
-          descendantFiber.elementType?.displayName ||
-          descendantFiber.elementType?.name ||
-          descendantFiber.type?.displayName ||
-          descendantFiber.type?.name ||
-          '',
-        );
-        if (
-          props?.message?.syncId === expected &&
-          props.message?.msgId === expected
-        ) {
-          attachmentMessage ||= props.message;
-          addUnique(messages, props.message);
-          addUnique(attachmentMessages, props.message);
-          if (typeof props.loadAttachment === 'function') {
-            attachmentLoadAttachment ||= props.loadAttachment;
+        for (const candidateFiber of [descendantFiber, descendantFiber.alternate].filter(Boolean)) {
+          const props = candidateFiber.memoizedProps;
+          const componentName = String(
+            candidateFiber.elementType?.displayName ||
+            candidateFiber.elementType?.name ||
+            candidateFiber.type?.displayName ||
+            candidateFiber.type?.name ||
+            '',
+          );
+          if (
+            props?.message?.syncId === expected &&
+            typeof props.message?.msgId === 'string' &&
+            uuid.test(props.message.msgId) &&
+            matchesAttachmentEnvelope(props.message)
+          ) {
+            addUnique(messages, props.message);
+            addUnique(attachmentMessages, props.message);
+            if (
+              componentName === 'MessageEntryBody' &&
+              typeof props.loadAttachment === 'function'
+            ) {
+              attachmentMessage ||= props.message;
+              attachmentLoadAttachment ||= props.loadAttachment;
+            }
           }
-        }
-        if (
-          componentName === 'MessageEntryDocument' &&
-          props?.message?.syncId === expected &&
-          props.message?.msgId === expected
-        ) {
-          attachmentMessage ||= props.message;
-          addUnique(messages, props.message);
-          addUnique(attachmentMessages, props.message);
-          if (typeof props.onClick === 'function') {
-            documentOnClick ||= props.onClick;
+          if (
+            componentName === 'MessageEntryDocument' &&
+            props?.message?.syncId === expected &&
+            typeof props.message?.msgId === 'string' &&
+            uuid.test(props.message.msgId) &&
+            matchesAttachmentEnvelope(props.message)
+          ) {
+            addUnique(messages, props.message);
+            addUnique(attachmentMessages, props.message);
+            if (typeof props.onClick === 'function') {
+              documentOnClick ||= props.onClick;
+            }
           }
         }
       }
@@ -789,7 +888,7 @@ function buildAttachmentLookupExpression(messageId: string): string {
       ? {
           message,
           messages,
-          attachmentMessage,
+          attachmentMessage: attachmentMessage || attachmentMessages[0] || null,
           attachmentMessages,
           type: node.getAttribute('data-message-type'),
           loadAttachment: attachmentLoadAttachment || envelopeLoadAttachment,
@@ -937,13 +1036,50 @@ export class ExpressDesktopClient {
   private rpc: CdpRpc | null = null;
   private readonly cdpUrl: string;
   private readonly timeoutMs: number;
+  private readonly chats = new Map<string, DesktopChatTarget>();
+  private readonly uiMutex: DesktopUiMutex;
 
   constructor(private readonly config: DesktopClientConfig) {
     this.cdpUrl = normalizeLoopbackCdpUrl(config.cdpUrl);
     this.timeoutMs = config.timeoutMs ?? 10_000;
+    const targets = config.chats?.length
+      ? config.chats
+      : config.chatId && config.chatTitle
+        ? [{ chatId: config.chatId, chatTitle: config.chatTitle }]
+        : [];
+    const chatTitles = new Set<string>();
+    for (const target of targets) {
+      const chatId = target.chatId.toLowerCase();
+      const chatTitle = target.chatTitle.trim();
+      if (this.chats.has(chatId)) {
+        throw new Error("desktop eXpress chat allowlist contains duplicates");
+      }
+      if (chatTitles.has(chatTitle)) {
+        throw new Error(
+          "desktop eXpress chat title allowlist contains duplicates",
+        );
+      }
+      chatTitles.add(chatTitle);
+      this.chats.set(chatId, {
+        chatId,
+        chatTitle,
+      });
+    }
+    if (!this.chats.size) {
+      throw new Error("desktop eXpress chat allowlist is empty");
+    }
+    this.uiMutex = desktopUiMutexFor(this.cdpUrl);
+  }
+
+  withUiLock<T>(work: () => Promise<T>): Promise<T> {
+    return this.uiMutex.runExclusive(work);
   }
 
   async connect(): Promise<void> {
+    return this.withUiLock(() => this.connectUnlocked());
+  }
+
+  private async connectUnlocked(): Promise<void> {
     if (this.rpc) return;
     const response = await fetch(`${this.cdpUrl}/json/list`, {
       redirect: "error",
@@ -975,34 +1111,52 @@ export class ExpressDesktopClient {
   }
 
   async snapshot(): Promise<DesktopSnapshot> {
+    return this.withUiLock(() => this.snapshotUnlocked());
+  }
+
+  private async snapshotUnlocked(): Promise<DesktopSnapshot> {
     const result = await this.evaluate<DesktopSnapshot>(
       buildDesktopSnapshotExpression(),
     );
     return result;
   }
 
-  async openAllowedChat(): Promise<boolean> {
-    return this.evaluate<boolean>(
-      buildOpenChatExpression(this.config.chatTitle),
-    );
+  async openAllowedChat(targetChatId?: string): Promise<boolean> {
+    return this.withUiLock(async () => {
+      const target = this.resolveTarget(targetChatId);
+      return this.evaluate<boolean>(buildOpenChatExpression(target.chatTitle));
+    });
   }
 
-  assertSnapshotAllowed(snapshot: DesktopSnapshot): void {
+  async snapshotAllowed(targetChatId: string): Promise<DesktopSnapshot> {
+    return this.withUiLock(() => this.ensureTargetActive(targetChatId));
+  }
+
+  assertSnapshotAllowed(
+    snapshot: DesktopSnapshot,
+    targetChatId?: string,
+  ): void {
+    const target = this.resolveTarget(targetChatId);
     if (!snapshot.authenticated)
       throw new Error("official eXpress desktop client is not authenticated");
-    if (snapshot.chatId !== this.config.chatId)
+    if (snapshot.chatId?.toLowerCase() !== target.chatId)
       throw new Error("active desktop chat UUID is not allowlisted");
-    if (snapshot.chatTitle !== this.config.chatTitle)
+    if (snapshot.chatTitle !== target.chatTitle)
       throw new Error("active desktop chat title is not allowlisted");
   }
 
   async sendText(targetChatId: string, text: string): Promise<string> {
-    if (targetChatId !== this.config.chatId)
-      throw new Error("desktop outbound target is not allowlisted");
+    return this.withUiLock(() => this.sendTextUnlocked(targetChatId, text));
+  }
+
+  private async sendTextUnlocked(
+    targetChatId: string,
+    text: string,
+  ): Promise<string> {
+    const target = this.resolveTarget(targetChatId);
     const safeText = text.trim();
     if (!safeText) return "";
-    const before = await this.snapshot();
-    this.assertSnapshotAllowed(before);
+    const before = await this.ensureTargetActive(target.chatId);
     if (!before.composerReady)
       throw new Error("desktop message composer is unavailable");
     if (!(await this.evaluate<boolean>(buildFocusComposerExpression()))) {
@@ -1050,8 +1204,8 @@ export class ExpressDesktopClient {
     });
     for (let attempt = 0; attempt < 20; attempt += 1) {
       await new Promise((resolvePromise) => setTimeout(resolvePromise, 250));
-      const after = await this.snapshot();
-      this.assertSnapshotAllowed(after);
+      const after = await this.snapshotUnlocked();
+      this.assertSnapshotAllowed(after, target.chatId);
       if (
         after.lastOwnMessageId &&
         after.lastOwnMessageId !== before.lastOwnMessageId
@@ -1065,16 +1219,20 @@ export class ExpressDesktopClient {
   }
 
   async setTyping(targetChatId: string, active: boolean): Promise<void> {
-    if (targetChatId !== this.config.chatId) {
-      throw new Error("desktop outbound target is not allowlisted");
-    }
-    const before = await this.snapshot();
-    this.assertSnapshotAllowed(before);
+    return this.withUiLock(() => this.setTypingUnlocked(targetChatId, active));
+  }
+
+  private async setTypingUnlocked(
+    targetChatId: string,
+    active: boolean,
+  ): Promise<void> {
+    const target = this.resolveTarget(targetChatId);
+    const before = await this.ensureTargetActive(target.chatId);
     if (!before.composerReady) {
       throw new Error("desktop message composer is unavailable");
     }
     const invoked = await this.evaluate<boolean>(
-      buildDesktopTypingExpression(targetChatId, active),
+      buildDesktopTypingExpression(target.chatId, active),
     );
     if (!invoked) {
       throw new Error("desktop native typing action is unavailable");
@@ -1084,7 +1242,19 @@ export class ExpressDesktopClient {
   async downloadAttachment(
     message: DesktopMessage,
     maxBytes: number,
+    targetChatId?: string,
   ): Promise<DesktopDownloadedAttachment> {
+    return this.withUiLock(() =>
+      this.downloadAttachmentUnlocked(message, maxBytes, targetChatId),
+    );
+  }
+
+  private async downloadAttachmentUnlocked(
+    message: DesktopMessage,
+    maxBytes: number,
+    targetChatId?: string,
+  ): Promise<DesktopDownloadedAttachment> {
+    const target = this.resolveTarget(targetChatId);
     const attachment = message.attachment;
     if (message.type === "text" || !attachment) {
       throw new Error("desktop inbound message has no file attachment");
@@ -1100,8 +1270,7 @@ export class ExpressDesktopClient {
       throw new Error("desktop inbound attachment exceeds the media limit");
     }
 
-    const before = await this.snapshot();
-    this.assertSnapshotAllowed(before);
+    const before = await this.ensureTargetActive(target.chatId);
     const visible = before.messages.find((entry) => entry.id === message.id);
     if (
       !visible?.attachment ||
@@ -1181,8 +1350,8 @@ export class ExpressDesktopClient {
     if (buffer.length !== attachment.fileSize) {
       throw new Error("desktop inbound attachment is incomplete");
     }
-    const after = await this.snapshot();
-    this.assertSnapshotAllowed(after);
+    const after = await this.snapshotUnlocked();
+    this.assertSnapshotAllowed(after, target.chatId);
     const afterMessage = after.messages.find(
       (entry) => entry.id === message.id,
     );
@@ -1204,11 +1373,15 @@ export class ExpressDesktopClient {
     targetChatId: string,
     file: DesktopOutboundFile,
   ): Promise<string> {
-    if (targetChatId !== this.config.chatId) {
-      throw new Error("desktop outbound target is not allowlisted");
-    }
-    const before = await this.snapshot();
-    this.assertSnapshotAllowed(before);
+    return this.withUiLock(() => this.sendFileUnlocked(targetChatId, file));
+  }
+
+  private async sendFileUnlocked(
+    targetChatId: string,
+    file: DesktopOutboundFile,
+  ): Promise<string> {
+    const target = this.resolveTarget(targetChatId);
+    const before = await this.ensureTargetActive(target.chatId);
     if (!before.composerReady) {
       throw new Error("desktop message composer is unavailable");
     }
@@ -1240,8 +1413,8 @@ export class ExpressDesktopClient {
     if (!nodeId) {
       throw new Error(`desktop eXpress ${file.kind} input is unavailable`);
     }
-    const immediatelyBeforeSend = await this.snapshot();
-    this.assertSnapshotAllowed(immediatelyBeforeSend);
+    const immediatelyBeforeSend = await this.snapshotUnlocked();
+    this.assertSnapshotAllowed(immediatelyBeforeSend, target.chatId);
     if (
       immediatelyBeforeSend.lastOwnMessageId !== before.lastOwnMessageId ||
       !immediatelyBeforeSend.composerReady
@@ -1275,8 +1448,8 @@ export class ExpressDesktopClient {
 
     for (let attempt = 0; attempt < 80; attempt += 1) {
       await new Promise((resolvePromise) => setTimeout(resolvePromise, 250));
-      const after = await this.snapshot();
-      this.assertSnapshotAllowed(after);
+      const after = await this.snapshotUnlocked();
+      this.assertSnapshotAllowed(after, target.chatId);
       const messageId = confirmedDesktopOutboundFileMessageId(
         before,
         after,
@@ -1287,6 +1460,50 @@ export class ExpressDesktopClient {
     throw new Error(
       "desktop outbound file was not confirmed by the official client",
     );
+  }
+
+  private resolveTarget(targetChatId?: string): DesktopChatTarget {
+    if (targetChatId) {
+      const target = this.chats.get(targetChatId.toLowerCase());
+      if (!target)
+        throw new Error("desktop outbound target is not allowlisted");
+      return target;
+    }
+    if (this.chats.size !== 1) {
+      throw new Error("desktop chat target must be explicit");
+    }
+    return this.chats.values().next().value as DesktopChatTarget;
+  }
+
+  /**
+   * Always select by exact title, then verify both UUID and title. This is
+   * deliberately done before every mutating/download operation, even when the
+   * requested chat already appears active.
+   */
+  private async ensureTargetActive(
+    targetChatId: string,
+  ): Promise<DesktopSnapshot> {
+    const target = this.resolveTarget(targetChatId);
+    const opened = await this.evaluate<boolean>(
+      buildOpenChatExpression(target.chatTitle),
+    );
+    if (!opened) {
+      throw new Error("desktop allowlisted chat was not found");
+    }
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      if (attempt) {
+        await new Promise((resolvePromise) => setTimeout(resolvePromise, 50));
+      }
+      const snapshot = await this.snapshotUnlocked();
+      if (
+        snapshot.chatId?.toLowerCase() === target.chatId &&
+        snapshot.chatTitle === target.chatTitle
+      ) {
+        this.assertSnapshotAllowed(snapshot, target.chatId);
+        return snapshot;
+      }
+    }
+    throw new Error("desktop active chat did not match the allowlisted target");
   }
 
   private async evaluate<T>(expression: string): Promise<T> {
@@ -1506,11 +1723,14 @@ export function desktopClientFromAccount(
   timeoutMs?: number,
 ): ExpressDesktopClient {
   const cdpUrl = account.config.desktopCdpUrl;
-  const chatId = account.config.desktopChatId;
-  const chatTitle = account.config.desktopChatTitle;
-  if (!cdpUrl || !chatId || !chatTitle)
+  const chats = resolveExpressDesktopChats(account);
+  if (!cdpUrl || chats.length === 0)
     throw new Error("desktop eXpress account is incomplete");
-  return new ExpressDesktopClient({ cdpUrl, chatId, chatTitle, timeoutMs });
+  return new ExpressDesktopClient({
+    cdpUrl,
+    chats: chats.map(({ chatId, chatTitle }) => ({ chatId, chatTitle })),
+    timeoutMs,
+  });
 }
 
 export async function probeExpressDesktop(
@@ -1519,10 +1739,12 @@ export async function probeExpressDesktop(
 ) {
   const client = desktopClientFromAccount(account, timeoutMs);
   try {
-    const snapshot = await client.snapshot();
-    client.assertSnapshotAllowed(snapshot);
-    if (!snapshot.composerReady)
-      return { ok: false, error: "desktop composer unavailable" };
+    for (const chat of resolveExpressDesktopChats(account)) {
+      const snapshot = await client.snapshotAllowed(chat.chatId);
+      client.assertSnapshotAllowed(snapshot, chat.chatId);
+      if (!snapshot.composerReady)
+        return { ok: false, error: "desktop composer unavailable" };
+    }
     return { ok: true };
   } catch (error) {
     return {

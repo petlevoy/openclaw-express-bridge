@@ -50,6 +50,15 @@ const IMAGE_EXTENSIONS = new Set([
   ".png",
   ".webp",
 ]);
+const EXTENSIONLESS_IMAGE_MIME_TYPES = new Set([
+  "image/bmp",
+  "image/gif",
+  "image/jpeg",
+  "image/png",
+  "image/vnd.microsoft.icon",
+  "image/webp",
+  "image/x-icon",
+]);
 const AUDIO_EXTENSIONS = new Set([
   ".aac",
   ".flac",
@@ -107,6 +116,7 @@ export function isDesktopAttachmentMetadataCompatible(
     );
   }
   if (messageType === "image") {
+    if (!extension) return EXTENSIONLESS_IMAGE_MIME_TYPES.has(mimeType);
     return IMAGE_EXTENSIONS.has(extension) && mimeType.startsWith("image/");
   }
   if (messageType === "audio" || messageType === "voice") {
@@ -249,6 +259,7 @@ export function selectDesktopInboundBatchResilient(
   const rejected: DesktopRejectedInboundEvent[] = [];
   for (const message of messages) {
     if (queued.length + rejected.length >= maxPending) break;
+    if (alreadySeen(message.id) || queuedIds.has(message.id)) continue;
     try {
       const selected = selectDesktopInboundBatch(
         [message],

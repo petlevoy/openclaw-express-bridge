@@ -9,6 +9,7 @@ import {
   listExpressAccountIds,
   resolveDefaultExpressAccountId,
   resolveExpressAccount,
+  resolveExpressDesktopChats,
 } from "./accounts.js";
 
 describe("eXpress Account Resolution", () => {
@@ -154,6 +155,47 @@ describe("eXpress Account Resolution", () => {
       expect(account.mode).toBe("desktop");
       expect(account.configured).toBe(true);
       expect(account.botId).toBe("");
+      expect(resolveExpressDesktopChats(account)).toEqual([
+        {
+          chatId: "00000000-0000-4000-8000-000000000001",
+          chatTitle: "Example Chat",
+          senderId: "00000000-0000-4000-8000-000000000002",
+          senderName: undefined,
+        },
+      ]);
+    });
+
+    it("prefers enabled desktopChats and keeps legacy compatibility", () => {
+      const cfg: OpenClawConfig = {
+        channels: {
+          express: {
+            enabled: true,
+            mode: "desktop",
+            desktopCdpUrl: "http://127.0.0.1:18997",
+            desktopChatId: "00000000-0000-4000-8000-000000000099",
+            desktopChatTitle: "Legacy",
+            desktopSenderId: "00000000-0000-4000-8000-000000000098",
+            desktopChats: [
+              {
+                chatId: "00000000-0000-4000-8000-000000000001",
+                chatTitle: "Enabled",
+                senderId: "00000000-0000-4000-8000-000000000011",
+              },
+              {
+                chatId: "00000000-0000-4000-8000-000000000002",
+                chatTitle: "Disabled",
+                senderId: "00000000-0000-4000-8000-000000000022",
+                enabled: false,
+              },
+            ],
+          },
+        },
+      };
+      const account = resolveExpressAccount({ cfg });
+      expect(account.configured).toBe(true);
+      expect(
+        resolveExpressDesktopChats(account).map((chat) => chat.chatTitle),
+      ).toEqual(["Enabled"]);
     });
 
     it("should use default webhook port", () => {

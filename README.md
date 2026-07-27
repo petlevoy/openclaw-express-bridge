@@ -1,4 +1,4 @@
-# openclaw-express-bridge 1.1.6
+# openclaw-express-bridge 1.1.8
 
 `openclaw-express-bridge` is an enterprise AI integration layer that connects
 OpenClaw agents to on-premises eXpress deployments through the official Linux
@@ -48,7 +48,7 @@ grant was found in the client payload.
 Debian package:
 
 ```bash
-sudo apt install ./openclaw-express-bridge_1.1.6_amd64.deb
+sudo apt install ./openclaw-express-bridge_1.1.8_amd64.deb
 openclaw-express-bridge install
 openclaw-express-bridge install-client
 ```
@@ -56,8 +56,8 @@ openclaw-express-bridge install-client
 Portable archive:
 
 ```bash
-tar -xzf openclaw-express-bridge-1.1.6-linux-amd64.tar.gz
-cd openclaw-express-bridge-1.1.6
+tar -xzf openclaw-express-bridge-1.1.8-linux-amd64.tar.gz
+cd openclaw-express-bridge-1.1.8
 ./install.sh
 ~/.local/bin/openclaw-express-bridge install-client
 ```
@@ -85,7 +85,7 @@ checks what it needs but does not run a package manager.
    profile stay in the current user's private data directory.
 
 2. Obtain the exact direct-chat UUID and sender UUID from your approved eXpress
-   environment, then configure the single allowed conversation:
+   environment, then configure the first allowed conversation:
 
    ```bash
    openclaw-express-bridge configure \
@@ -97,7 +97,8 @@ checks what it needs but does not run a package manager.
    ```
 
    The two UUIDs are both written to `allowFrom`; wildcard allowlists are never
-   generated. Configuration leaves outbound disabled.
+   generated. This bootstrap command writes the backward-compatible single-chat
+   fields. Configuration leaves outbound disabled.
 
 3. Restart the OpenClaw gateway using your normal deployment procedure. Check:
 
@@ -111,6 +112,105 @@ checks what it needs but does not run a package manager.
    ```bash
    openclaw-express-bridge enable-outbound
    ```
+
+## Multiple direct chats through one desktop session
+
+Plugin 2.3.0 adds `desktopChats`, an exact array allowlist that takes precedence
+over the legacy `desktopChatId`, `desktopChatTitle`, `desktopSenderId` and
+`desktopSenderName` fields. One monitor and one official desktop client/CDP
+serve all enabled entries. Do not run a second monitor or desktop client against
+the same profile.
+
+```json
+{
+  "channels": {
+    "express": {
+      "mode": "desktop",
+      "dmPolicy": "allowlist",
+      "desktopChats": [
+        {
+          "chatId": "00000000-0000-4000-8000-000000000001",
+          "chatTitle": "Alice Example",
+          "senderId": "00000000-0000-4000-8000-000000000011",
+          "senderName": "Alice"
+        },
+        {
+          "chatId": "00000000-0000-4000-8000-000000000002",
+          "chatTitle": "Bob Example",
+          "senderId": "00000000-0000-4000-8000-000000000022",
+          "senderName": "Bob"
+        }
+      ],
+      "allowFrom": [
+        "00000000-0000-4000-8000-000000000001",
+        "00000000-0000-4000-8000-000000000011",
+        "00000000-0000-4000-8000-000000000002",
+        "00000000-0000-4000-8000-000000000022"
+      ],
+      "desktopDispatchConcurrency": 2
+    }
+  },
+  "bindings": [
+    {
+      "agentId": "alice-agent",
+      "match": {
+        "channel": "express",
+        "peer": {
+          "kind": "direct",
+          "id": "00000000-0000-4000-8000-000000000011"
+        }
+      }
+    }
+  ]
+}
+```
+
+`allowFrom` must contain exactly every enabled chat UUID and sender UUID—no
+wildcard, missing ID or extra ID. Chat UUIDs, titles and sender UUIDs must each
+be unique.
+Inbound routing uses OpenClaw's standard `resolveAgentRoute` with
+`peer.id=senderId`; replies are bound to the `chatId` captured from that same
+inbound event.
+
+The monitor polls chats round-robin. Desktop UI actions share one global async
+mutex, while agent work runs outside it. Each chat has a sequential bounded
+queue and its own durable dedupe/retry/quarantine state. Different chats may run
+independently, with shared model concurrency defaulting to 2.
+
+To prepare complete routing arrays for future users without reading or changing
+the active OpenClaw configuration, keep the approved non-secret chat objects in
+a JSON inventory and run:
+
+```bash
+node tools/generate-desktop-routing.mjs ./approved-chats.json
+```
+
+Include `agentId` only for users that need a non-default agent. Review the JSON
+output and merge the complete `desktopChats`, exact `allowFrom` and `bindings`
+arrays; array fragments are not blind merge patches.
+
+Create the private agent/workspace before adding its binding:
+
+```bash
+node tools/create-isolated-agent.mjs \
+  ./new-agent.json \
+  /home/operator/.openclaw/agents \
+  > ./new-agent-fragment.json
+```
+
+The creator refuses existing targets, makes a mode-0700 workspace with
+mode-0600 instruction files, copies no secret/memory/connector file and prints
+one non-secret `agents.list` object. It never reads or modifies
+`openclaw.json`. The generated sandbox has full local file/document tooling,
+host-mediated web search, a separate sandbox browser, no direct container
+network, no host binds and no messaging/configuration/session tools.
+
+Review and append the generated agent object, regenerate routing from the full
+approved chat inventory, validate the complete OpenClaw configuration and only
+then restart through the normal deployment procedure. One desktop session can
+therefore serve many exact chats while each routed user receives a distinct
+agent, workspace, memory and session boundary. See
+`deployment/isolated-agent/README.md` for the reusable sandbox image.
 
 ## Safety model
 
@@ -157,20 +257,24 @@ attachment inputs. Audio, voice and video entries are accepted inbound when the
 official client exposes complete, valid file metadata; video also has a native
 outbound input, while audio outbound uses the document input.
 
-For client 3.68.44 the bridge resolves the exact nested attachment message and
-invokes its official
+For client 3.68.44 the bridge resolves the exact nested attachment message,
+including entries whose internal `msgId` differs from the visible message
+`syncId`, and invokes its official
 `MessageEntryBody.loadAttachment({message, downloadToBlob: true})` handler for
 documents, images, audio/voice and video. `MessageEntryDocument.onClick` remains
 a document-only compatibility fallback. It reads attachment metadata from
 `message.payload.payload` or the client's compatible file envelope, resolves
-only verified nested/direct blob fields, and copies only a `Blob` or
+only verified current/alternate React attachment state and nested/direct blob
+fields, and copies only a `Blob` or
 `blob:file:` URL from the canonical nested message into OpenClaw in bounded
 512 KiB chunks. Stale outer-envelope blobs are ignored whenever the exact nested
 message is present. File UUID, sender UUID, name, size and MIME type are checked
 before and after the download; generic Electron blob types are accepted only
 when the declared file metadata is allowlisted and compatible. The saved path
 and declared media type are passed through OpenClaw's standard inbound media
-context.
+context. Extensionless image names emitted by the client's screenshot workflow
+are accepted only for a small explicit image MIME allowlist; OpenClaw derives
+the stored file extension from the verified MIME type.
 
 The bridge does not bundle a speech-to-text service. Audio and voice arrive
 through OpenClaw's generic inbound media context, so transcription is performed
@@ -212,15 +316,15 @@ streaming. Non-loopback CTS endpoints must use HTTPS.
 
 ## Feature scope matrix
 
-| Requirement | 1.1.6 state |
+| Requirement | 1.1.8 state |
 |---|---|
 | Native OpenClaw channel lifecycle | Implemented |
-| Default/named account configuration | Implemented; concurrent desktop accounts require separate client/CDP sessions |
+| Default/named account configuration | Implemented; multiple chats share one serialized desktop client/CDP session |
 | Concurrent BotX accounts on one listener | Blocked with BotX inbound |
 | BotX JWT v2 inbound authentication | Not implemented; fail-closed |
 | Shared HTTP listener and account routing | Not implemented |
 | Standard inbound routing/session context | Desktop implemented |
-| Access policies | Desktop exact allowlist only |
+| Access policies | Desktop exact per-chat UUID/title and sender allowlist only |
 | Standard outbound text delivery | Desktop and BotX implemented |
 | PDF, DOC(X), XLS(X), PPT(X) | Desktop receive/send implemented |
 | Images | Desktop receive/send implemented |
@@ -297,7 +401,8 @@ Please report suspected vulnerabilities privately as described in
   plugin update after a client upgrade.
 - The public build pins one verified client release; a newer release requires a
   reviewed URL and SHA-256 update in `client.env`.
-- Only Linux amd64 and one exact direct chat are covered by the 1.1.6 bootstrap.
+- Only Linux amd64 is packaged. The `configure` bootstrap command still creates
+  one legacy chat; additional chats use reviewed `desktopChats` configuration.
 - No live eXpress file was sent by the automated test suite; the desktop file
   contract is covered by unit tests and must be canary-tested in an approved chat.
 - BotX inbound, shared-listener routing, reactions and chat/thread creation are

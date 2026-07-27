@@ -9,6 +9,13 @@ import {
 } from "openclaw/plugin-sdk/channel-config-schema";
 import { z } from "openclaw/plugin-sdk/zod";
 
+const ExpressUuidSchema = z
+  .string()
+  .regex(
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i,
+    "invalid eXpress UUID",
+  );
+
 function requireOpenAllowFrom(params: {
   policy: string | undefined;
   allowFrom: unknown[] | undefined;
@@ -30,6 +37,60 @@ function requireOpenAllowFrom(params: {
   });
 }
 
+const DesktopChatSchema = z
+  .object({
+    chatId: ExpressUuidSchema,
+    chatTitle: z.string().trim().min(1),
+    senderId: ExpressUuidSchema,
+    senderName: z.string().trim().min(1).optional(),
+    enabled: z.boolean().optional(),
+  })
+  .strict();
+
+function validateDesktopChats(
+  value: {
+    desktopChats?: Array<{
+      chatId: string;
+      chatTitle: string;
+      senderId: string;
+    }>;
+  },
+  ctx: z.RefinementCtx,
+): void {
+  const chatIds = new Set<string>();
+  const chatTitles = new Set<string>();
+  const senderIds = new Set<string>();
+  for (const [index, chat] of (value.desktopChats ?? []).entries()) {
+    const chatId = chat.chatId.toLowerCase();
+    const chatTitle = chat.chatTitle.trim();
+    const senderId = chat.senderId.toLowerCase();
+    if (chatIds.has(chatId)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["desktopChats", index, "chatId"],
+        message: "desktopChats chatId values must be unique",
+      });
+    }
+    if (senderIds.has(senderId)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["desktopChats", index, "senderId"],
+        message: "desktopChats senderId values must be unique",
+      });
+    }
+    if (chatTitles.has(chatTitle)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["desktopChats", index, "chatTitle"],
+        message: "desktopChats chatTitle values must be unique",
+      });
+    }
+    chatIds.add(chatId);
+    chatTitles.add(chatTitle);
+    senderIds.add(senderId);
+  }
+}
+
 /**
  * eXpress account config (base schema for both top-level and accounts.*)
  */
@@ -49,10 +110,12 @@ export const ExpressAccountSchemaBase = z
     mediaMaxMb: z.number().positive().max(100).optional(),
     textChunkLimit: z.number().int().positive().optional(),
     desktopCdpUrl: z.string().url().optional(),
-    desktopChatId: z.string().uuid().optional(),
+    desktopChatId: ExpressUuidSchema.optional(),
     desktopChatTitle: z.string().min(1).optional(),
-    desktopSenderId: z.string().uuid().optional(),
+    desktopSenderId: ExpressUuidSchema.optional(),
     desktopSenderName: z.string().min(1).optional(),
+    desktopChats: z.array(DesktopChatSchema).min(1).max(32).optional(),
+    desktopDispatchConcurrency: z.number().int().min(1).max(8).optional(),
     desktopPollIntervalMs: z.number().int().min(250).max(60_000).optional(),
     desktopStatePath: z.string().min(1).optional(),
     desktopOutboundEnabled: z.boolean().optional(),
@@ -84,6 +147,7 @@ export const ExpressAccountSchema = ExpressAccountSchemaBase.superRefine(
       message:
         'channels.express.dmPolicy="open" requires channels.express.allowFrom to include "*"',
     });
+    validateDesktopChats(value, ctx);
   },
 );
 
@@ -101,6 +165,7 @@ export const ExpressConfigSchema = ExpressAccountSchemaBase.extend({
     message:
       'channels.express.dmPolicy="open" requires channels.express.allowFrom to include "*"',
   });
+  validateDesktopChats(value, ctx);
 });
 
 // Re-export ToolPolicySchema for convenience

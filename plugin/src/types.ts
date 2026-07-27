@@ -146,6 +146,10 @@ export interface ExpressAccountConfig {
   desktopSenderId?: string;
   /** Optional display name used in OpenClaw envelopes. */
   desktopSenderName?: string;
+  /** Exact desktop chat/sender allowlist. Takes precedence over legacy fields. */
+  desktopChats?: DesktopChatConfig[];
+  /** Maximum simultaneous agent turns across desktop chats. */
+  desktopDispatchConcurrency?: number;
   /** Poll interval for the already-decrypted desktop DOM. */
   desktopPollIntervalMs?: number;
   /** Persistent deduplication state path. */
@@ -160,6 +164,14 @@ export interface ExpressAccountConfig {
   desktopAckMode?: "off" | "typing" | "message";
   /** Text acknowledgement and fallback when native typing is unavailable. */
   desktopAckText?: string;
+}
+
+export interface DesktopChatConfig {
+  chatId: string;
+  chatTitle: string;
+  senderId: string;
+  senderName?: string;
+  enabled?: boolean;
 }
 
 export interface ExpressChannelConfig {
@@ -184,6 +196,8 @@ export interface ExpressChannelConfig {
   desktopChatTitle?: string;
   desktopSenderId?: string;
   desktopSenderName?: string;
+  desktopChats?: DesktopChatConfig[];
+  desktopDispatchConcurrency?: number;
   desktopPollIntervalMs?: number;
   desktopStatePath?: string;
   desktopOutboundEnabled?: boolean;

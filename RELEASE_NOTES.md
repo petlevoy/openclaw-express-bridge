@@ -1,5 +1,45 @@
 # Release notes
 
+## 1.1.8
+
+- Ships eXpress plugin 2.3.0 with backward-compatible `desktopChats` support for
+  multiple exact direct chats through one official desktop client and one CDP
+  endpoint.
+- Polls chats round-robin, serializes all active-chat, download,
+  acknowledgement and outbound UI work with one endpoint-wide async mutex, and
+  keeps model execution outside that lock.
+- Adds a bounded FIFO queue per chat plus a shared dispatch concurrency of 2 by
+  default, so a long agent turn does not stop polling or processing another
+  user.
+- Separates durable baseline, dedupe, acknowledgement, retry and poison-message
+  quarantine state by chat. Legacy single-chat deployments retain their
+  existing state path.
+- Routes with standard `resolveAgentRoute(peer.id=senderId)` and binds every
+  reply to the inbound event's chat UUID. Every send opens the exact configured
+  title and re-checks both UUID and title before mutating the desktop client.
+- Adds schema uniqueness checks, exact fail-closed `allowFrom` validation, a
+  non-applying routing-fragment generator, a generic isolated agent/workspace
+  creator with no embedded user data, and regression coverage for legacy
+  config, multi-chat routing, round-robin scheduling, queue isolation, global
+  UI serialization, media handling and no-cross-send behavior.
+- Retains the 2.2.6 inbound image/attachment fixes unchanged. No live eXpress
+  send is performed by the automated suite.
+
+## 1.1.7
+
+- Ships eXpress plugin 2.2.6 and accepts the official desktop client's
+  extensionless screenshot names when they carry an explicit allowlisted image
+  MIME type. Arbitrary extensionless files and SVG remain rejected.
+- Resolves the live image attachment component when its internal `msgId`
+  differs from the visible message `syncId`, and checks both current and
+  alternate React fiber state for the blob published after
+  `MessageEntryBody.loadAttachment`.
+- Preserves bounded UUID/sender/name/size/MIME validation, then stores the image
+  through OpenClaw's `media/inbound` path and supplies standard `MediaPath` and
+  `MediaType` context for vision/OCR.
+- Stops revalidating and relogging an attachment after its exact message ID has
+  already been quarantined.
+
 ## 1.1.6
 
 - Ships eXpress plugin 2.2.5 and routes generic

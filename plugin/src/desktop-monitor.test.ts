@@ -7,7 +7,9 @@ import { describe, expect, it, vi } from "vitest";
 import { DesktopDedupeStore, type DesktopMessage } from "./desktop-cdp.js";
 import {
   DesktopInboundAttachmentError,
+  desktopStatePathForChat,
   processDesktopInboundEvent,
+  validateDesktopExactAllowlist,
 } from "./desktop-monitor.js";
 
 const senderId = "00000000-0000-4000-8000-000000000099";
@@ -20,6 +22,57 @@ const message = (suffix: string, type: DesktopMessage["type"] = "document") =>
   }) satisfies DesktopMessage;
 
 describe("desktop inbound event isolation", () => {
+  it("separates durable state by chat without changing the legacy path", () => {
+    const base = "/tmp/express-state.json";
+    expect(desktopStatePathForChat(base, "default", "chat-a", false)).toBe(
+      base,
+    );
+    expect(desktopStatePathForChat(base, "default", "chat-a", true)).toBe(
+      "/tmp/express-state.chat-a.json",
+    );
+    expect(desktopStatePathForChat(base, "default", "chat-b", true)).toBe(
+      "/tmp/express-state.chat-b.json",
+    );
+  });
+
+  it("requires an exact fail-closed chat and sender allowlist", () => {
+    const chats = [
+      {
+        chatId: "00000000-0000-4000-8000-000000000001",
+        chatTitle: "Alice",
+        senderId: "00000000-0000-4000-8000-000000000011",
+      },
+      {
+        chatId: "00000000-0000-4000-8000-000000000002",
+        chatTitle: "Bob",
+        senderId: "00000000-0000-4000-8000-000000000022",
+      },
+    ];
+    expect(() =>
+      validateDesktopExactAllowlist(chats, [
+        chats[0].chatId,
+        chats[0].senderId,
+        chats[1].chatId,
+        chats[1].senderId,
+      ]),
+    ).not.toThrow();
+    expect(() =>
+      validateDesktopExactAllowlist(chats, [
+        chats[0].chatId,
+        chats[0].senderId,
+      ]),
+    ).toThrow(/exactly match/);
+    expect(() =>
+      validateDesktopExactAllowlist(chats, [
+        chats[0].chatId,
+        chats[0].senderId,
+        chats[1].chatId,
+        chats[1].senderId,
+        "00000000-0000-4000-8000-000000000099",
+      ]),
+    ).toThrow(/exactly match/);
+  });
+
   it("does not reconnect for one attachment failure and continues the batch", async () => {
     const directory = await mkdtemp(join(tmpdir(), "express-event-test-"));
     const store = new DesktopDedupeStore(join(directory, "state.json"));

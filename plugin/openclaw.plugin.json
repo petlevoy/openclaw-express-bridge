@@ -2,7 +2,7 @@
   "id": "openclaw-express",
   "name": "eXpress",
   "description": "eXpress channel plugin (BotX or official Linux desktop bridge)",
-  "version": "2.2.5",
+  "version": "2.3.0",
   "channels": ["express"],
   "configSchema": {
     "type": "object",
@@ -65,10 +65,32 @@
           },
           "textChunkLimit": { "type": "integer", "minimum": 1 },
           "desktopCdpUrl": { "type": "string" },
-          "desktopChatId": { "type": "string", "format": "uuid" },
+          "desktopChatId": { "type": "string", "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$" },
           "desktopChatTitle": { "type": "string", "minLength": 1 },
-          "desktopSenderId": { "type": "string", "format": "uuid" },
+          "desktopSenderId": { "type": "string", "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$" },
           "desktopSenderName": { "type": "string", "minLength": 1 },
+          "desktopChats": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 32,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["chatId", "chatTitle", "senderId"],
+              "properties": {
+                "chatId": { "type": "string", "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$" },
+                "chatTitle": { "type": "string", "minLength": 1 },
+                "senderId": { "type": "string", "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$" },
+                "senderName": { "type": "string", "minLength": 1 },
+                "enabled": { "type": "boolean" }
+              }
+            }
+          },
+          "desktopDispatchConcurrency": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 8
+          },
           "desktopPollIntervalMs": {
             "type": "integer",
             "minimum": 250,
@@ -147,10 +169,32 @@
                 },
                 "textChunkLimit": { "type": "integer", "minimum": 1 },
                 "desktopCdpUrl": { "type": "string" },
-                "desktopChatId": { "type": "string", "format": "uuid" },
+                "desktopChatId": { "type": "string", "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$" },
                 "desktopChatTitle": { "type": "string", "minLength": 1 },
-                "desktopSenderId": { "type": "string", "format": "uuid" },
+                "desktopSenderId": { "type": "string", "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$" },
                 "desktopSenderName": { "type": "string", "minLength": 1 },
+                "desktopChats": {
+                  "type": "array",
+                  "minItems": 1,
+                  "maxItems": 32,
+                  "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["chatId", "chatTitle", "senderId"],
+                    "properties": {
+                      "chatId": { "type": "string", "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$" },
+                      "chatTitle": { "type": "string", "minLength": 1 },
+                      "senderId": { "type": "string", "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$" },
+                      "senderName": { "type": "string", "minLength": 1 },
+                      "enabled": { "type": "boolean" }
+                    }
+                  }
+                },
+                "desktopDispatchConcurrency": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 8
+                },
                 "desktopPollIntervalMs": {
                   "type": "integer",
                   "minimum": 250,
