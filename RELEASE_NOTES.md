@@ -1,5 +1,14 @@
 # Release notes
 
+## 1.1.15
+
+- Ships eXpress plugin 2.3.7 and explicitly selects OpenClaw's automatic
+  source-reply delivery for desktop inbound turns. Ordinary assistant finals
+  now enter the bridge's verified durable delivery callback instead of being
+  retained privately by the newer `message_tool_only` default.
+- Adds regression coverage for the source-reply contract. The automated suite
+  performs no live eXpress send.
+
 ## 1.1.14
 
 - Ships eXpress plugin 2.3.6 and splits native composer staging from commit

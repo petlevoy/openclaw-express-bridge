@@ -6,6 +6,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import { DesktopDedupeStore, type DesktopMessage } from "./desktop-cdp.js";
 import {
+  createDesktopSourceReplyOptions,
   DesktopActiveSessionRegistry,
   DesktopInboundAttachmentError,
   desktopPollSliceMs,
@@ -26,6 +27,14 @@ const message = (suffix: string, type: DesktopMessage["type"] = "document") =>
   }) satisfies DesktopMessage;
 
 describe("desktop inbound event isolation", () => {
+  it("delivers ordinary source replies through the desktop callback", () => {
+    const onModelSelected = vi.fn();
+    expect(createDesktopSourceReplyOptions(onModelSelected)).toEqual({
+      onModelSelected,
+      sourceReplyDeliveryMode: "automatic",
+    });
+  });
+
   it("bounds multi-chat UI switching without slowing a single chat", () => {
     expect(desktopPollSliceMs(250, 1)).toBe(250);
     expect(desktopPollSliceMs(1_000, 3)).toBe(1_000);

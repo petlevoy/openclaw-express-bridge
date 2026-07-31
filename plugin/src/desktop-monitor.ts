@@ -39,6 +39,19 @@ export const DESKTOP_INBOUND_EVENT_MAX_ATTEMPTS = 3;
 export const MIN_DESKTOP_CHAT_SWITCH_INTERVAL_MS = 1_000;
 const DEFAULT_DESKTOP_DISPATCH_CONCURRENCY = 2;
 
+export function createDesktopSourceReplyOptions(
+  onModelSelected: ReturnType<
+    typeof createReplyPrefixOptions
+  >["onModelSelected"],
+) {
+  return {
+    onModelSelected,
+    // Desktop inbound owns a verified delivery callback. Keep ordinary model
+    // finals on that path instead of requiring the agent to call `message`.
+    sourceReplyDeliveryMode: "automatic" as const,
+  };
+}
+
 export function desktopPollSliceMs(
   pollIntervalMs: number,
   chatCount: number,
@@ -839,7 +852,7 @@ async function dispatchDesktopInbound(
       },
       replyPipeline: {},
       dispatcherOptions: prefixOptions,
-      replyOptions: { onModelSelected },
+      replyOptions: createDesktopSourceReplyOptions(onModelSelected),
       record: {
         onRecordError: (error) => {
           log?.error?.(
