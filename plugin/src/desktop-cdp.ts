@@ -7,14 +7,16 @@
  */
 
 import { AsyncLocalStorage } from "node:async_hooks";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   chmod,
   lstat,
   mkdir,
+  open,
   readFile,
   realpath,
   rename,
+  unlink,
   writeFile,
 } from "node:fs/promises";
 import { homedir } from "node:os";
@@ -180,14 +182,158 @@ export interface DesktopFailureDisposition {
   quarantined: boolean;
 }
 
+export interface DesktopDedupeHealth {
+  seen: number;
+  acknowledged: number;
+  claimed: number;
+  failures: number;
+  quarantined: number;
+}
+
+const DESKTOP_UI_LOCK_WAIT_MS = 60_000;
+const DESKTOP_UI_LOCK_POLL_MS = 25;
+const DESKTOP_UI_EMPTY_LOCK_GRACE_MS = 5_000;
+
+interface DesktopUiLockOwner {
+  pid: number;
+  token: string;
+  acquiredAt: number;
+}
+
+function desktopUiLockPath(cdpUrl: string): string {
+  const openClawHome = resolveUserPath(
+    process.env.OPENCLAW_HOME?.trim() || "~/.openclaw",
+  );
+  const endpointHash = createHash("sha256")
+    .update(cdpUrl)
+    .digest("hex")
+    .slice(0, 20);
+  return join(openClawHome, "express", `desktop-ui-${endpointHash}.lock`);
+}
+
+function isProcessAlive(pid: number): boolean {
+  if (!Number.isSafeInteger(pid) || pid < 1) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "EPERM";
+  }
+}
+
+async function readDesktopUiLockOwner(
+  path: string,
+): Promise<DesktopUiLockOwner | null> {
+  try {
+    const parsed = JSON.parse(
+      await readFile(path, "utf8"),
+    ) as Partial<DesktopUiLockOwner>;
+    if (
+      !Number.isSafeInteger(parsed.pid) ||
+      typeof parsed.token !== "string" ||
+      !parsed.token ||
+      typeof parsed.acquiredAt !== "number"
+    ) {
+      return null;
+    }
+    return parsed as DesktopUiLockOwner;
+  } catch {
+    return null;
+  }
+}
+
+async function releaseDesktopUiFileLock(
+  path: string,
+  token: string,
+): Promise<void> {
+  const owner = await readDesktopUiLockOwner(path);
+  if (owner?.token !== token) return;
+  try {
+    await unlink(path);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+}
+
+async function acquireDesktopUiFileLock(
+  path: string,
+  waitMs: number,
+): Promise<() => Promise<void>> {
+  await mkdir(dirname(path), { recursive: true, mode: 0o700 });
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < waitMs) {
+    const token = randomUUID();
+    try {
+      const handle = await open(path, "wx", 0o600);
+      try {
+        await handle.writeFile(
+          `${JSON.stringify({ pid: process.pid, token, acquiredAt: Date.now() })}\n`,
+        );
+      } finally {
+        await handle.close();
+      }
+      return () => releaseDesktopUiFileLock(path, token);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    }
+
+    const owner = await readDesktopUiLockOwner(path);
+    let removeStale = Boolean(owner && !isProcessAlive(owner.pid));
+    if (!owner) {
+      try {
+        const state = await lstat(path);
+        removeStale =
+          Date.now() - state.mtimeMs >= DESKTOP_UI_EMPTY_LOCK_GRACE_MS;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
+        throw error;
+      }
+    }
+    if (removeStale) {
+      if (owner) {
+        const currentOwner = await readDesktopUiLockOwner(path);
+        if (currentOwner?.token !== owner.token) continue;
+      } else {
+        try {
+          const currentState = await lstat(path);
+          if (
+            Date.now() - currentState.mtimeMs <
+            DESKTOP_UI_EMPTY_LOCK_GRACE_MS
+          ) {
+            continue;
+          }
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
+          throw error;
+        }
+      }
+      try {
+        await unlink(path);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      }
+      continue;
+    }
+    await new Promise((resolvePromise) =>
+      setTimeout(resolvePromise, DESKTOP_UI_LOCK_POLL_MS),
+    );
+  }
+  throw new Error("desktop eXpress cross-process UI lock wait timed out");
+}
+
 /**
- * Re-entrant promise mutex. A single instance is shared by all clients for
- * the same loopback CDP endpoint so monitor polling, acknowledgements and
- * ad-hoc outbound sends can never race the desktop UI.
+ * Re-entrant mutex combining in-process FIFO ordering with a filesystem lease.
+ * The file lease protects the same CDP endpoint when a standalone OpenClaw CLI
+ * process is loaded alongside the long-running Gateway.
  */
 export class DesktopUiMutex {
   private tail: Promise<void> = Promise.resolve();
   private readonly context = new AsyncLocalStorage<boolean>();
+
+  constructor(
+    private readonly fileLockPath?: string,
+    private readonly fileLockWaitMs = DESKTOP_UI_LOCK_WAIT_MS,
+  ) {}
 
   async runExclusive<T>(work: () => Promise<T>): Promise<T> {
     if (this.context.getStore()) return work();
@@ -197,10 +343,21 @@ export class DesktopUiMutex {
       release = resolvePromise;
     });
     await previous;
+    let releaseFileLock: (() => Promise<void>) | undefined;
     try {
+      if (this.fileLockPath) {
+        releaseFileLock = await acquireDesktopUiFileLock(
+          this.fileLockPath,
+          this.fileLockWaitMs,
+        );
+      }
       return await this.context.run(true, work);
     } finally {
-      release();
+      try {
+        await releaseFileLock?.();
+      } finally {
+        release();
+      }
     }
   }
 }
@@ -210,7 +367,7 @@ const desktopUiMutexes = new Map<string, DesktopUiMutex>();
 function desktopUiMutexFor(cdpUrl: string): DesktopUiMutex {
   let mutex = desktopUiMutexes.get(cdpUrl);
   if (!mutex) {
-    mutex = new DesktopUiMutex();
+    mutex = new DesktopUiMutex(desktopUiLockPath(cdpUrl));
     desktopUiMutexes.set(cdpUrl, mutex);
   }
   return mutex;
@@ -2008,6 +2165,19 @@ export class DesktopDedupeStore {
 
   hasInboundClaim(id: string): boolean {
     return this.claimed.has(id);
+  }
+
+  async healthSnapshot(): Promise<DesktopDedupeHealth> {
+    return this.coordinator.mutex.runExclusive(async () => {
+      await this.refreshIfStaleUnlocked();
+      return {
+        seen: this.seen.size,
+        acknowledged: this.acknowledged.size,
+        claimed: this.claimed.size,
+        failures: this.failures.size,
+        quarantined: this.quarantined.size,
+      };
+    });
   }
 
   /**

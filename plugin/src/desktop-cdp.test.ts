@@ -64,6 +64,33 @@ describe("eXpress desktop CDP bridge", () => {
     expect(events).toEqual(["first-start", "first-end", "second"]);
   });
 
+  it("serializes desktop UI work across independent process mutexes", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "express-ui-lock-test-"));
+    const lockPath = join(directory, "desktop-ui.lock");
+    const firstMutex = new DesktopUiMutex(lockPath, 2_000);
+    const secondMutex = new DesktopUiMutex(lockPath, 2_000);
+    const events: string[] = [];
+    let release!: () => void;
+    const gate = new Promise<void>((resolvePromise) => {
+      release = resolvePromise;
+    });
+
+    const first = firstMutex.runExclusive(async () => {
+      events.push("first-start");
+      await gate;
+      events.push("first-end");
+    });
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 25));
+    const second = secondMutex.runExclusive(async () => {
+      events.push("second");
+    });
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 75));
+    expect(events).toEqual(["first-start"]);
+    release();
+    await Promise.all([first, second]);
+    expect(events).toEqual(["first-start", "first-end", "second"]);
+  });
+
   it("requires an exact UUID and title for every configured target", async () => {
     const chatId = "00000000-0000-4000-8000-000000000001";
     const otherChatId = "00000000-0000-4000-8000-000000000002";

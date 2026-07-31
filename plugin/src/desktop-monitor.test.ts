@@ -2,6 +2,7 @@ import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+import type { OpenClawConfig } from "openclaw/plugin-sdk/core";
 import { describe, expect, it, vi } from "vitest";
 
 import { DesktopDedupeStore, type DesktopMessage } from "./desktop-cdp.js";
@@ -9,12 +10,15 @@ import {
   createDesktopSourceReplyOptions,
   DesktopActiveSessionRegistry,
   DesktopInboundAttachmentError,
+  DesktopInboundReplyDeliveryError,
   desktopPollSliceMs,
+  DesktopReplyDeliveryTracker,
   desktopStatePathForChat,
   isDesktopPriorityAbortMessage,
   processDesktopInboundEvent,
   resolveDesktopDurableTextDelivery,
   validateDesktopExactAllowlist,
+  validateDesktopExactPeerRoutes,
 } from "./desktop-monitor.js";
 
 const senderId = "00000000-0000-4000-8000-000000000099";
@@ -33,6 +37,70 @@ describe("desktop inbound event isolation", () => {
       onModelSelected,
       sourceReplyDeliveryMode: "automatic",
     });
+  });
+
+  it("requires a confirmed final before completing an ordinary inbound", () => {
+    const tracker = new DesktopReplyDeliveryTracker();
+    tracker.observe("tool", { visibleReplySent: true });
+    tracker.observe("final", { visibleReplySent: false });
+    expect(() => tracker.assertFinalVisible(true)).toThrow(
+      DesktopInboundReplyDeliveryError,
+    );
+
+    tracker.observe("final", {});
+    expect(() => tracker.assertFinalVisible(true)).not.toThrow();
+  });
+
+  it("requires exact peer bindings and resolves a distinct session per chat", () => {
+    const chats = [
+      {
+        chatId: "00000000-0000-4000-8000-000000000001",
+        chatTitle: "Alice",
+        senderId: "00000000-0000-4000-8000-000000000011",
+      },
+      {
+        chatId: "00000000-0000-4000-8000-000000000002",
+        chatTitle: "Bob",
+        senderId: "00000000-0000-4000-8000-000000000022",
+      },
+    ];
+    const exactConfig = {
+      agents: { list: [{ id: "main" }, { id: "express" }] },
+      session: { dmScope: "per-channel-peer" as const },
+      bindings: chats.map((chat) => ({
+        type: "route" as const,
+        agentId: "express",
+        match: {
+          channel: "express",
+          accountId: "default",
+          peer: { kind: "direct" as const, id: chat.senderId },
+        },
+      })),
+    } as OpenClawConfig;
+    const routes = validateDesktopExactPeerRoutes(
+      exactConfig,
+      "default",
+      chats,
+    );
+    expect(routes.map((route) => route.matchedBy)).toEqual([
+      "binding.peer",
+      "binding.peer",
+    ]);
+    expect(new Set(routes.map((route) => route.sessionKey)).size).toBe(2);
+
+    const wildcardConfig = {
+      agents: exactConfig.agents,
+      bindings: [
+        {
+          type: "route" as const,
+          agentId: "express",
+          match: { channel: "express", accountId: "default" },
+        },
+      ],
+    } as OpenClawConfig;
+    expect(() =>
+      validateDesktopExactPeerRoutes(wildcardConfig, "default", chats),
+    ).toThrow(/exact direct peer binding/);
   });
 
   it("bounds multi-chat UI switching without slowing a single chat", () => {
@@ -227,6 +295,27 @@ describe("desktop inbound event isolation", () => {
       processDesktopInboundEvent({ message: poison, store, work }),
     ).resolves.toBe("quarantined");
     expect(store.has(poison.id)).toBe(true);
+  });
+
+  it("bounds repeated invisible finals instead of spending tokens forever", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "express-private-test-"));
+    const store = new DesktopDedupeStore(join(directory, "state.json"));
+    await store.load();
+    const inbound = message("30", "text");
+    const work = async () => {
+      throw new DesktopInboundReplyDeliveryError("no visible final");
+    };
+
+    await expect(
+      processDesktopInboundEvent({ message: inbound, store, work }),
+    ).resolves.toBe("retry");
+    await expect(
+      processDesktopInboundEvent({ message: inbound, store, work }),
+    ).resolves.toBe("retry");
+    await expect(
+      processDesktopInboundEvent({ message: inbound, store, work }),
+    ).resolves.toBe("quarantined");
+    expect(store.has(inbound.id)).toBe(true);
   });
 
   it("still reconnects on transport or OpenClaw dispatch failure", async () => {

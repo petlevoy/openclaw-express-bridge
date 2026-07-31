@@ -1,4 +1,4 @@
-# openclaw-express-bridge 1.1.13
+# openclaw-express-bridge 1.1.16
 
 `openclaw-express-bridge` is an enterprise AI integration layer that connects
 OpenClaw agents to on-premises eXpress deployments through the official Linux
@@ -48,7 +48,7 @@ grant was found in the client payload.
 Debian package:
 
 ```bash
-sudo apt install ./openclaw-express-bridge_1.1.13_amd64.deb
+sudo apt install ./openclaw-express-bridge_1.1.16_amd64.deb
 openclaw-express-bridge install
 openclaw-express-bridge install-client
 ```
@@ -56,8 +56,8 @@ openclaw-express-bridge install-client
 Portable archive:
 
 ```bash
-tar -xzf openclaw-express-bridge-1.1.13-linux-amd64.tar.gz
-cd openclaw-express-bridge-1.1.13
+tar -xzf openclaw-express-bridge-1.1.16-linux-amd64.tar.gz
+cd openclaw-express-bridge-1.1.16
 ./install.sh
 ~/.local/bin/openclaw-express-bridge install-client
 ```
@@ -115,7 +115,7 @@ checks what it needs but does not run a package manager.
 
 ## Multiple direct chats through one desktop session
 
-Plugin 2.3.7 supports `desktopChats`, an exact array allowlist that takes precedence
+Plugin 2.3.8 supports `desktopChats`, an exact array allowlist that takes precedence
 over the legacy `desktopChatId`, `desktopChatTitle`, `desktopSenderId` and
 `desktopSenderName` fields. One monitor and one official desktop client/CDP
 serve all enabled entries. Do not run a second monitor or desktop client against
@@ -150,6 +150,9 @@ the same profile.
       "desktopDispatchConcurrency": 2
     }
   },
+  "session": {
+    "dmScope": "per-channel-peer"
+  },
   "bindings": [
     {
       "agentId": "alice-agent",
@@ -158,6 +161,16 @@ the same profile.
         "peer": {
           "kind": "direct",
           "id": "00000000-0000-4000-8000-000000000011"
+        }
+      }
+    },
+    {
+      "agentId": "bob-agent",
+      "match": {
+        "channel": "express",
+        "peer": {
+          "kind": "direct",
+          "id": "00000000-0000-4000-8000-000000000022"
         }
       }
     }
@@ -170,10 +183,13 @@ wildcard, missing ID or extra ID. Chat UUIDs, titles and sender UUIDs must each
 be unique.
 Inbound routing uses OpenClaw's standard `resolveAgentRoute` with
 `peer.id=senderId`; replies are bound to the `chatId` captured from that same
-inbound event.
+inbound event. Every enabled chat must have an exact direct-peer binding and
+must resolve to a distinct session key; channel/account wildcard or default
+routes fail bridge startup. Set `session.dmScope` to `per-channel-peer`.
 
-The monitor polls chats round-robin. Desktop UI actions share one global async
-mutex, while agent work runs outside it. Each chat has a sequential bounded
+The monitor polls chats round-robin. Desktop UI actions share one endpoint-wide
+mutex backed by an atomic lock file, including standalone OpenClaw processes,
+while agent work runs outside it. Each chat has a sequential bounded
 queue and its own durable dedupe/retry/quarantine state. Different chats may run
 independently, with shared model concurrency defaulting to 2. Multi-chat mode
 waits at least one second between visible chat switches, preventing the
@@ -183,8 +199,8 @@ chats are added. A single chat retains its configured poll interval.
 Every desktop operation routes by the configured chat UUID, including a bounded
 official-router fallback for entries outside the rendered chat list. The title
 is a second, fail-closed identity check after navigation; it is never the
-selector. Do not run raw CDP scripts alongside the bridge because a separate
-process cannot participate in its endpoint-wide UI mutex.
+selector. Do not run raw CDP scripts alongside the bridge: only the plugin and
+its standard channel adapter participate in the endpoint-wide UI mutex.
 
 Desktop text is limited to 1,800 characters per chunk. The bridge writes and
 sends through the official client's verified `ChatInputText` component instead
@@ -205,13 +221,17 @@ treated as a cancellation command, and attachments never use the priority path.
 Validated event IDs are claimed in the per-chat state file before they enter an
 in-memory queue. State mutations are serialized and published with an atomic
 file replacement. A reconnect or provider reload therefore cannot submit a
-claimed event again. The claim remains durable while dispatch is active, becomes
-a normal seen ID after success, and is released after a definitive dispatch or
-attachment failure so a later poll can retry. Claims are owned by one Gateway
+claimed event again. The claim remains durable while dispatch is active and
+becomes a normal seen ID only after the final reply has a confirmed visible
+platform delivery. A missing visible final is retried twice and then
+quarantined on the third failure, so it cannot silently disappear or consume
+tokens forever. Claims are released after a definitive dispatch, attachment or
+reply-delivery failure so a later poll can retry. Claims are owned by one Gateway
 process; after a full process restart, unfinished claims are also retryable
 instead of becoming permanently lost. If the provider is stopped while dispatch
 is active, the bridge asks the Gateway to abort that exact session with a bounded
-request.
+request. A payload-free watchdog audits live turns, durable claims, retries,
+quarantine and the outbound journal every 30 seconds without calling a model.
 
 OpenClaw defers every channel reload while any Gateway operation, pending reply,
 embedded run or restart-blocking background task is active. That gate is global
@@ -368,7 +388,7 @@ streaming. Non-loopback CTS endpoints must use HTTPS.
 
 ## Feature scope matrix
 
-| Requirement | 1.1.13 state |
+| Requirement | 1.1.16 state |
 |---|---|
 | Native OpenClaw channel lifecycle | Implemented |
 | Default/named account configuration | Implemented; multiple chats share one serialized desktop client/CDP session |

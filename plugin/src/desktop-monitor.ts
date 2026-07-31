@@ -5,6 +5,10 @@ import { extname, join } from "node:path";
 
 import { createReplyPrefixOptions } from "openclaw/plugin-sdk/channel-runtime";
 import { isAbortRequestText } from "openclaw/plugin-sdk/reply-runtime";
+import {
+  resolveAgentRoute,
+  type ResolvedAgentRoute,
+} from "openclaw/plugin-sdk/routing";
 
 import { resolveExpressDesktopChats } from "./accounts.js";
 import {
@@ -20,6 +24,7 @@ import {
   isDesktopOutboundUnlocked,
   validateDesktopOutboundFile,
 } from "./desktop-cdp.js";
+import { loadDesktopDeliveryJournal } from "./desktop-delivery-journal.js";
 import { desktopReplySender, desktopRoutePeer } from "./desktop-routing.js";
 import {
   DesktopDispatchRateLimiter,
@@ -30,6 +35,7 @@ import {
   DesktopDispatchScheduler,
   DesktopRoundRobin,
 } from "./desktop-scheduler.js";
+import { DesktopDeliveryWatchdog } from "./desktop-watchdog.js";
 import { toPlainText } from "./format.js";
 import type { ExpressMonitorOptions } from "./monitor.js";
 import { getExpressRuntime } from "./runtime.js";
@@ -38,6 +44,58 @@ import type { DesktopChatConfig } from "./types.js";
 export const DESKTOP_INBOUND_EVENT_MAX_ATTEMPTS = 3;
 export const MIN_DESKTOP_CHAT_SWITCH_INTERVAL_MS = 1_000;
 const DEFAULT_DESKTOP_DISPATCH_CONCURRENCY = 2;
+
+export class DesktopInboundReplyDeliveryError extends Error {
+  constructor(readonly detail: string) {
+    super("desktop inbound reply was not visibly delivered");
+    this.name = "DesktopInboundReplyDeliveryError";
+  }
+}
+
+export class DesktopReplyDeliveryTracker {
+  private finalVisible = false;
+
+  observe(kind: string, result: { visibleReplySent?: boolean } | void): void {
+    if (kind === "final" && result?.visibleReplySent !== false) {
+      this.finalVisible = true;
+    }
+  }
+
+  assertFinalVisible(required: boolean): void {
+    if (!required || this.finalVisible) return;
+    throw new DesktopInboundReplyDeliveryError(
+      "dispatcher settled without a confirmed visible final",
+    );
+  }
+}
+
+export function validateDesktopExactPeerRoutes(
+  config: ExpressMonitorOptions["config"],
+  accountId: string,
+  chats: DesktopChatConfig[],
+): ResolvedAgentRoute[] {
+  const routes = chats.map((chat) =>
+    resolveAgentRoute({
+      cfg: config,
+      channel: "express",
+      accountId,
+      peer: desktopRoutePeer(chat),
+    }),
+  );
+  for (const [index, route] of routes.entries()) {
+    if (route.matchedBy !== "binding.peer") {
+      throw new Error(
+        `eXpress desktop chat ${index + 1} requires an exact direct peer binding; resolved by ${route.matchedBy}`,
+      );
+    }
+  }
+  if (new Set(routes.map((route) => route.sessionKey)).size !== routes.length) {
+    throw new Error(
+      "eXpress desktop chats must resolve to separate per-peer session keys",
+    );
+  }
+  return routes;
+}
 
 export function createDesktopSourceReplyOptions(
   onModelSelected: ReturnType<
@@ -180,7 +238,12 @@ export async function processDesktopInboundEvent(
     await options.store.add(options.message.id);
     return "delivered";
   } catch (error) {
-    if (!(error instanceof DesktopInboundAttachmentError)) throw error;
+    if (
+      !(error instanceof DesktopInboundAttachmentError) &&
+      !(error instanceof DesktopInboundReplyDeliveryError)
+    ) {
+      throw error;
+    }
     const disposition = await options.store.recordFailure(
       options.message.id,
       options.maxAttempts ?? DESKTOP_INBOUND_EVENT_MAX_ATTEMPTS,
@@ -311,6 +374,11 @@ export async function startExpressDesktopMonitor(
     throw new Error("eXpress desktop bridge requires dmPolicy=allowlist");
   }
   validateDesktopExactAllowlist(chats, account.config.allowFrom ?? []);
+  const routes = validateDesktopExactPeerRoutes(
+    opts.config,
+    account.accountId,
+    chats,
+  );
 
   const chatRuntimes: DesktopChatRuntime[] = [];
   for (const chat of chats) {
@@ -330,6 +398,48 @@ export async function startExpressDesktopMonitor(
       pendingIds: new Set(),
     });
   }
+
+  const deliveryWatchdog = new DesktopDeliveryWatchdog();
+  let watchdogLastError: string | null = null;
+  let watchdogFingerprint = "";
+  let watchdogAuditPromise: Promise<void> | null = null;
+  const auditWatchdog = async () => {
+    const [journal, ...dedupe] = await Promise.all([
+      loadDesktopDeliveryJournal(account),
+      ...chatRuntimes.map((runtime) => runtime.store.healthSnapshot()),
+    ]);
+    const issues = deliveryWatchdog.audit({
+      dedupe,
+      journalEntries: Object.values(journal?.entries ?? {}),
+    });
+    const fingerprint = issues.join("; ");
+    watchdogLastError = issues.length
+      ? `eXpress delivery watchdog: ${fingerprint}`
+      : null;
+    if (fingerprint === watchdogFingerprint) return;
+    if (issues.length > 0) {
+      log?.warn?.(`[${account.accountId}] ${watchdogLastError}`);
+      statusSink?.({ lastError: watchdogLastError });
+    } else if (watchdogFingerprint) {
+      log?.info?.(`[${account.accountId}] eXpress delivery watchdog healthy`);
+    }
+    watchdogFingerprint = fingerprint;
+  };
+  const requestWatchdogAudit = () => {
+    if (watchdogAuditPromise) return;
+    watchdogAuditPromise = auditWatchdog()
+      .catch((error) => {
+        log?.warn?.(
+          `[${account.accountId}] eXpress delivery watchdog audit failed: ${redactDesktopError(error)}`,
+        );
+      })
+      .finally(() => {
+        watchdogAuditPromise = null;
+      });
+  };
+  await auditWatchdog();
+  const watchdogTimer = setInterval(requestWatchdogAudit, 30_000);
+  watchdogTimer.unref();
 
   const pollIntervalMs = account.config.desktopPollIntervalMs ?? 1000;
   const pollSliceMs = desktopPollSliceMs(pollIntervalMs, chatRuntimes.length);
@@ -372,9 +482,13 @@ export async function startExpressDesktopMonitor(
   const roundRobin = new DesktopRoundRobin(chatRuntimes);
   let reconnectDelayMs = 1000;
 
-  statusSink?.({ running: true, lastStartAt: Date.now(), lastError: null });
+  statusSink?.({
+    running: true,
+    lastStartAt: Date.now(),
+    lastError: watchdogLastError,
+  });
   log?.info?.(
-    `[${account.accountId}] eXpress desktop bridge started (${chats.length} exact chat allowlist entries, shared CDP mutex, dispatch concurrency ${account.config.desktopDispatchConcurrency ?? DEFAULT_DESKTOP_DISPATCH_CONCURRENCY})`,
+    `[${account.accountId}] eXpress desktop bridge started (${chats.length} exact chat allowlist entries, exact peer routes to ${[...new Set(routes.map((route) => route.agentId))].join(",")}, cross-process CDP mutex, dispatch concurrency ${account.config.desktopDispatchConcurrency ?? DEFAULT_DESKTOP_DISPATCH_CONCURRENCY})`,
   );
 
   try {
@@ -384,7 +498,7 @@ export async function startExpressDesktopMonitor(
         const snapshot = await client.snapshotAllowed(runtime.chat.chatId);
         client.assertSnapshotAllowed(snapshot, runtime.chat.chatId);
         reconnectDelayMs = 1000;
-        statusSink?.({ lastError: null });
+        statusSink?.({ lastError: watchdogLastError });
 
         if (runtime.needsBaseline) {
           await runtime.store.baseline(
@@ -402,6 +516,7 @@ export async function startExpressDesktopMonitor(
             client,
             rateLimiter,
             activeSessions,
+            deliveryWatchdog,
           });
         }
         await sleepWithAbort(pollSliceMs, abortSignal);
@@ -417,6 +532,8 @@ export async function startExpressDesktopMonitor(
       }
     }
   } finally {
+    clearInterval(watchdogTimer);
+    await watchdogAuditPromise;
     abortSignal.removeEventListener("abort", abortActiveSessions);
     await activeSessions.abortAll();
     await client.withUiLock(async () => client.close());
@@ -434,14 +551,23 @@ async function queueSnapshotMessages(
     client: ReturnType<typeof desktopClientFromAccount>;
     rateLimiter: DesktopDispatchRateLimiter;
     activeSessions: DesktopActiveSessionRegistry;
+    deliveryWatchdog: DesktopDeliveryWatchdog;
   },
 ): Promise<void> {
   const { account, abortSignal, log, statusSink } = opts;
-  const { runtime, scheduler, client, rateLimiter, activeSessions } = params;
+  const {
+    runtime,
+    scheduler,
+    client,
+    rateLimiter,
+    activeSessions,
+    deliveryWatchdog,
+  } = params;
   const { chat, store, pendingIds } = runtime;
   const maxMediaBytes = Math.floor(
     (account.config.mediaMaxMb ?? DEFAULT_DESKTOP_MEDIA_MAX_MB) * 1024 * 1024,
   );
+  const watchdogKey = (messageId: string) => `${chat.chatId}:${messageId}`;
   const batch = selectDesktopInboundBatchResilient(
     params.snapshotMessages,
     (messageId) => store.has(messageId) || pendingIds.has(messageId),
@@ -474,6 +600,7 @@ async function queueSnapshotMessages(
       pendingIds.delete(rejected.message.id);
       continue;
     }
+    deliveryWatchdog.begin(watchdogKey(rejected.message.id));
     const accepted = scheduler.enqueue(chat.chatId, async () => {
       try {
         if (abortSignal.aborted) {
@@ -491,10 +618,12 @@ async function queueSnapshotMessages(
         });
       } finally {
         pendingIds.delete(rejected.message.id);
+        deliveryWatchdog.end(watchdogKey(rejected.message.id));
       }
     });
     if (!accepted) {
       pendingIds.delete(rejected.message.id);
+      deliveryWatchdog.end(watchdogKey(rejected.message.id));
       await store.releaseInboundClaim(rejected.message.id);
     }
   }
@@ -512,6 +641,7 @@ async function queueSnapshotMessages(
       pendingIds.delete(message.id);
       continue;
     }
+    deliveryWatchdog.begin(watchdogKey(message.id));
 
     if (isDesktopPriorityAbortMessage(message)) {
       const accepted = scheduler.runPriority(chat.chatId, async () => {
@@ -550,10 +680,12 @@ async function queueSnapshotMessages(
           throw error;
         } finally {
           pendingIds.delete(message.id);
+          deliveryWatchdog.end(watchdogKey(message.id));
         }
       });
       if (!accepted) {
         pendingIds.delete(message.id);
+        deliveryWatchdog.end(watchdogKey(message.id));
         await store.releaseInboundClaim(message.id);
         log?.warn?.(
           `[${account.accountId}] eXpress desktop priority queue full chat=${chat.chatId}`,
@@ -619,10 +751,12 @@ async function queueSnapshotMessages(
         throw error;
       } finally {
         pendingIds.delete(message.id);
+        deliveryWatchdog.end(watchdogKey(message.id));
       }
     });
     if (!accepted) {
       pendingIds.delete(message.id);
+      deliveryWatchdog.end(watchdogKey(message.id));
       await store.releaseInboundClaim(message.id);
       log?.warn?.(
         `[${account.accountId}] eXpress desktop per-chat queue full chat=${chat.chatId}`,
@@ -753,14 +887,16 @@ async function dispatchDesktopInbound(
     channel: "express",
     accountId: route.accountId,
   });
+  const deliveryTracker = new DesktopReplyDeliveryTracker();
 
-  const dispatch = () =>
-    core.channel.inbound.dispatchReply({
+  const dispatch = async () => {
+    const result = await core.channel.inbound.dispatchReply({
       cfg: config,
       channel: "express",
       accountId: account.accountId,
       agentId: route.agentId,
       routeSessionKey: route.sessionKey,
+      messageId: message.id,
       storePath,
       ctxPayload,
       recordInboundSession: core.channel.session.recordInboundSession,
@@ -840,6 +976,7 @@ async function dispatchDesktopInbound(
           }
         },
         onDelivered: (_payload, _info, result) => {
+          deliveryTracker.observe(_info.kind, result);
           if (result?.visibleReplySent !== false) {
             statusSink?.({ lastOutboundAt: Date.now() });
           }
@@ -861,6 +998,9 @@ async function dispatchDesktopInbound(
         },
       },
     });
+    deliveryTracker.assertFinalVisible(!isDesktopPriorityAbortMessage(message));
+    return result;
+  };
   if (activeSessions) {
     await activeSessions.run(route.sessionKey, dispatch);
   } else {

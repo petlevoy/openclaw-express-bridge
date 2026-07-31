@@ -1,5 +1,20 @@
 # Release notes
 
+## 1.1.16
+
+- Ships eXpress plugin 2.3.8. Ordinary inbound events are marked complete only
+  after the final reply has a confirmed visible delivery; missing visible
+  finals use a bounded retry and quarantine path instead of silent loss or
+  unlimited model retries.
+- Fails startup unless every enabled desktop chat resolves through an exact
+  direct-peer binding to a distinct per-peer session.
+- Extends the endpoint-wide desktop UI mutex across Gateway and standalone
+  OpenClaw processes, preventing active-chat races during CLI probes or sends.
+- Adds a payload-free, model-free watchdog for stale turns, orphan claims,
+  retries, quarantine and durable outbound journal entries. The release build
+  remains gated by unit tests, type checking, lint, formatting, compilation,
+  packaging smoke tests and secret scans.
+
 ## 1.1.15
 
 - Ships eXpress plugin 2.3.7 and explicitly selects OpenClaw's automatic
