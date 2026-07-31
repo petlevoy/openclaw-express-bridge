@@ -98,6 +98,11 @@ export interface DesktopClientConfig {
   timeoutMs?: number;
 }
 
+export interface DesktopTextSendHooks {
+  /** Persist recovery evidence before the native send action is invoked. */
+  beforeDispatch?: (snapshot: DesktopSnapshot) => Promise<void>;
+}
+
 export interface DesktopChatTarget {
   chatId: string;
   chatTitle: string;
@@ -1360,13 +1365,20 @@ export class ExpressDesktopClient {
       throw new Error("active desktop chat title is not allowlisted");
   }
 
-  async sendText(targetChatId: string, text: string): Promise<string> {
-    return this.withUiLock(() => this.sendTextUnlocked(targetChatId, text));
+  async sendText(
+    targetChatId: string,
+    text: string,
+    hooks?: DesktopTextSendHooks,
+  ): Promise<string> {
+    return this.withUiLock(() =>
+      this.sendTextUnlocked(targetChatId, text, hooks),
+    );
   }
 
   private async sendTextUnlocked(
     targetChatId: string,
     text: string,
+    hooks?: DesktopTextSendHooks,
   ): Promise<string> {
     const target = this.resolveTarget(targetChatId);
     const safeText = text.trim();
@@ -1380,6 +1392,7 @@ export class ExpressDesktopClient {
     if (!before.composerReady)
       throw new Error("desktop message composer is unavailable");
     try {
+      await hooks?.beforeDispatch?.(before);
       const dispatched = await this.evaluate<DesktopSendTextResult>(
         buildDesktopSendTextExpression(target.chatId, safeText),
       );
@@ -2167,13 +2180,14 @@ export async function sendExpressDesktopMessage(
   account: ResolvedExpressAccount,
   targetChatId: string,
   text: string,
+  hooks?: DesktopTextSendHooks,
 ): Promise<string> {
   if (!(await isDesktopOutboundUnlocked(account))) {
     throw new Error("desktop eXpress outbound is locked");
   }
   const client = desktopClientFromAccount(account);
   try {
-    return await client.sendText(targetChatId, text);
+    return await client.sendText(targetChatId, text, hooks);
   } finally {
     client.close();
   }

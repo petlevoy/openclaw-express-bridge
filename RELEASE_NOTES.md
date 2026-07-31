@@ -1,5 +1,17 @@
 # Release notes
 
+## 1.1.12
+
+- Ships eXpress plugin 2.3.4 with a native durable text adapter. Before the
+  official desktop client is allowed to send, the adapter records the exact
+  chat, text and visible own-message baseline; startup recovery can therefore
+  prove `sent` or `not_sent` instead of dropping an answer or replaying blind.
+- Bounds eXpress-originated native tool fan-out to three concurrent calls so a
+  large document-analysis turn cannot starve the Gateway event loop used by
+  channel polling and SQLite delivery state.
+- Initializes the delivery journal before the desktop monitor starts and keeps
+  legacy pre-journal queue entries fail-closed.
+
 ## 1.1.11
 
 - Ships eXpress plugin 2.3.3 and fixes live outbound

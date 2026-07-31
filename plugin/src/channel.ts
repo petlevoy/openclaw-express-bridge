@@ -31,7 +31,9 @@ import {
 import { expressMessageActions } from "./actions.js";
 import { ExpressConfigSchema } from "./config-schema.js";
 import { DEFAULT_DESKTOP_TEXT_CHUNK_LIMIT } from "./desktop-cdp.js";
+import { initializeDesktopDeliveryJournal } from "./desktop-delivery-journal.js";
 import { toPlainText } from "./format.js";
+import { expressMessageAdapter } from "./message-adapter.js";
 import {
   BOTX_INBOUND_DISABLED_MESSAGE,
   startExpressMonitor,
@@ -279,6 +281,8 @@ export const expressPlugin: ChannelPlugin<ResolvedExpressAccount> = {
     },
   },
 
+  message: expressMessageAdapter,
+
   setup: {
     resolveAccountId: ({ accountId }) => normalizeAccountId(accountId),
 
@@ -449,6 +453,8 @@ export const expressPlugin: ChannelPlugin<ResolvedExpressAccount> = {
       const { account, abortSignal, log } = ctx;
 
       log?.info(`[${account.accountId}] Starting eXpress provider`);
+
+      await initializeDesktopDeliveryJournal(account);
 
       return startExpressMonitor({
         account,

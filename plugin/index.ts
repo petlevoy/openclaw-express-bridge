@@ -1,5 +1,8 @@
+import type { OpenClawPluginApi } from "openclaw/plugin-sdk/core";
+
 import { setExpressRuntime } from "./src/runtime.js";
 import { expressPlugin } from "./src/channel.js";
+import { registerExpressToolConcurrencyGuard } from "./src/tool-concurrency-guard.js";
 
 const plugin = {
   id: "openclaw-express",
@@ -10,15 +13,12 @@ const plugin = {
     additionalProperties: false,
     properties: {},
   },
-  register(api: {
-    runtime: unknown;
-    registerChannel: (opts: { plugin: unknown }) => void;
-    logger: { info: (msg: string) => void; warn?: (msg: string) => void };
-  }) {
+  register(api: OpenClawPluginApi) {
     setExpressRuntime(api.runtime as Parameters<typeof setExpressRuntime>[0]);
     api.registerChannel({ plugin: expressPlugin });
+    registerExpressToolConcurrencyGuard(api, 3);
     api.logger.info(
-      "eXpress channel plugin registered (BotX + desktop bridge v2.3.3; delayed composer sync and renderer-reload tolerance active)",
+      "eXpress channel plugin registered (BotX + desktop bridge v2.3.4; bounded tool fan-out and durable desktop-send reconciliation active)",
     );
   },
 };
