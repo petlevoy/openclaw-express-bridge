@@ -132,6 +132,21 @@ export const DESKTOP_IMAGE_INPUT_SELECTOR =
 export const DESKTOP_VIDEO_INPUT_SELECTOR =
   'input[id^="video-input"][type="file"][accept="video/*"]';
 export const DESKTOP_TYPING_FAILSAFE_MS = 8_000;
+export const DEFAULT_DESKTOP_TEXT_CHUNK_LIMIT = 1_800;
+
+export interface DesktopPageState {
+  authenticated: boolean;
+  chatListReady: boolean;
+  rendererError: boolean;
+}
+
+export type DesktopOpenChatResult = "active" | "entry" | "router" | "missing";
+export type DesktopSendTextResult =
+  | "sent"
+  | "composer-missing"
+  | "native-action-missing"
+  | "chat-mismatch"
+  | "text-mismatch";
 
 interface DedupeState {
   version: 2 | 3 | 4 | 5;
@@ -336,6 +351,26 @@ export function confirmedDesktopOutboundFileMessageId(
       message.type === expectedType &&
       message.attachment?.fileName === expectedName &&
       message.attachment.fileSize === file.size,
+  );
+  return delivered?.id ?? null;
+}
+
+function normalizeDesktopOutboundText(text: string): string {
+  return text.replace(/\r\n/g, "\n").trim();
+}
+
+export function confirmedDesktopOutboundTextMessageId(
+  before: Pick<DesktopSnapshot, "ownMessages">,
+  after: Pick<DesktopSnapshot, "ownMessages">,
+  text: string,
+): string | null {
+  const previousIds = new Set(before.ownMessages.map((message) => message.id));
+  const expectedText = normalizeDesktopOutboundText(text);
+  const delivered = after.ownMessages.find(
+    (message) =>
+      !previousIds.has(message.id) &&
+      message.type === "text" &&
+      normalizeDesktopOutboundText(message.text) === expectedText,
   );
   return delivered?.id ?? null;
 }
@@ -694,24 +729,179 @@ export function buildDesktopSnapshotExpression(): string {
   })()`;
 }
 
-function buildOpenChatExpression(chatTitle: string): string {
-  const expected = JSON.stringify(chatTitle);
+export function buildDesktopPageStateExpression(): string {
   return `(() => {
-    const wanted = ${expected};
-    const entry = [...document.querySelectorAll('.chat-list-entry')]
-      .find((node) => String(node.querySelector('.chat-list-entry__name')?.innerText || '').trim() === wanted);
-    if (!entry) return false;
-    entry.click();
-    return true;
+    const hasAvatar = Boolean(document.querySelector('.settings-button__avatar'));
+    const hasChat = Boolean(document.querySelector('.chat'));
+    const chatListReady = Boolean(document.querySelector('.chat-list-entry'));
+    const authenticated = hasAvatar && (hasChat || chatListReady);
+    const text = String(document.body?.innerText || '');
+    const rendererError =
+      !authenticated &&
+      !hasChat &&
+      !chatListReady &&
+      (
+        text.includes('Something went wrong') ||
+        text.includes('Что-то пошло не так')
+      );
+    return { authenticated, chatListReady, rendererError };
   })()`;
 }
 
-function buildFocusComposerExpression(): string {
+/**
+ * Select an exact chat UUID. A mounted matching entry is preferred; the
+ * official React router is a bounded fallback for virtualized/off-screen
+ * entries. The configured title is verified only after navigation.
+ */
+export function buildOpenChatExpression(chatId: string): string {
+  const expected = JSON.stringify(chatId.toLowerCase());
   return `(() => {
+    const wanted = ${expected};
+    function fiberFor(node) {
+      if (!node) return null;
+      const fiberKey = Object.getOwnPropertyNames(node)
+        .find((key) => key.startsWith('__reactFiber$'));
+      return fiberKey ? node[fiberKey] : null;
+    }
+    function chatIdFromFiber(node) {
+      let fiber = fiberFor(node);
+      for (let index = 0; fiber && index < 40; index += 1, fiber = fiber.return) {
+        const props = fiber.memoizedProps;
+        const candidates = [
+          props?.chat?.groupChatId,
+          props?.groupChatId,
+          props?.item?.groupChatId,
+        ];
+        const matched = candidates.find(
+          (value) => typeof value === 'string' && value.toLowerCase() === wanted,
+        );
+        if (matched) return matched;
+      }
+      return null;
+    }
+    if (chatIdFromFiber(document.querySelector('.chat'))) return 'active';
+    for (const entry of document.querySelectorAll('.chat-list-entry')) {
+      if (chatIdFromFiber(entry)) {
+        entry.click();
+        return 'entry';
+      }
+    }
+    const roots = [
+      document.querySelector('.chat'),
+      document.querySelector('.chat-list'),
+      document.getElementById('root'),
+      document.body,
+    ].filter(Boolean);
+    for (const root of roots) {
+      let fiber = fiberFor(root);
+      for (let index = 0; fiber && index < 80; index += 1, fiber = fiber.return) {
+        const props = fiber.memoizedProps;
+        const histories = [
+          props?.history,
+          props?.router?.history,
+          props?.route?.history,
+        ];
+        const history = histories.find(
+          (candidate) =>
+            candidate &&
+            typeof candidate.push === 'function' &&
+            typeof candidate.location?.pathname === 'string',
+        );
+        if (history) {
+          history.push('/chats/' + wanted);
+          return 'router';
+        }
+      }
+    }
+    return 'missing';
+  })()`;
+}
+
+/**
+ * Use the official class component's text/send contract instead of synthetic
+ * keyboard input. This avoids the client 3.68.x Slate crash on large multiline
+ * Input.insertText payloads while retaining exact chat verification.
+ */
+export function buildDesktopSendTextExpression(
+  chatId: string,
+  text: string,
+): string {
+  const expectedChatId = JSON.stringify(chatId.toLowerCase());
+  const expectedText = JSON.stringify(text);
+  return `(async () => {
+    const expectedChatId = ${expectedChatId};
+    const expectedText = ${expectedText};
+    const editor = document.querySelector('.slate-message-input[contenteditable="true"]');
+    if (!editor) return 'composer-missing';
+    const fiberKey = Object.getOwnPropertyNames(editor)
+      .find((key) => key.startsWith('__reactFiber$'));
+    let fiber = fiberKey ? editor[fiberKey] : null;
+    for (let index = 0; fiber && index < 40; index += 1, fiber = fiber.return) {
+      const componentName = String(
+        fiber.elementType?.displayName ||
+        fiber.elementType?.name ||
+        fiber.type?.displayName ||
+        fiber.type?.name ||
+        '',
+      );
+      const instance = fiber.stateNode;
+      if (componentName !== 'ChatInputText' || !instance) continue;
+      if (String(instance.props?.chat?.groupChatId || '').toLowerCase() !== expectedChatId) {
+        return 'chat-mismatch';
+      }
+      if (
+        typeof instance.setInputText !== 'function' ||
+        typeof instance.getMessage !== 'function' ||
+        typeof instance.handleSendMessage !== 'function'
+      ) {
+        return 'native-action-missing';
+      }
+      editor.focus();
+      instance.setInputText({ text: expectedText, mentions: [] });
+      await new Promise((resolvePromise) => setTimeout(resolvePromise, 100));
+      const message = instance.getMessage();
+      if (String(message?.text || '').replace(/\\r\\n/g, '\\n') !== expectedText.replace(/\\r\\n/g, '\\n')) {
+        return 'text-mismatch';
+      }
+      instance.handleSendMessage();
+      return 'sent';
+    }
+    return 'native-action-missing';
+  })()`;
+}
+
+export function buildDesktopTextActionAvailableExpression(
+  chatId: string,
+): string {
+  const expectedChatId = JSON.stringify(chatId.toLowerCase());
+  return `(() => {
+    const expectedChatId = ${expectedChatId};
     const editor = document.querySelector('.slate-message-input[contenteditable="true"]');
     if (!editor) return false;
-    editor.focus();
-    return true;
+    const fiberKey = Object.getOwnPropertyNames(editor)
+      .find((key) => key.startsWith('__reactFiber$'));
+    let fiber = fiberKey ? editor[fiberKey] : null;
+    for (let index = 0; fiber && index < 40; index += 1, fiber = fiber.return) {
+      const componentName = String(
+        fiber.elementType?.displayName ||
+        fiber.elementType?.name ||
+        fiber.type?.displayName ||
+        fiber.type?.name ||
+        '',
+      );
+      const instance = fiber.stateNode;
+      if (
+        componentName === 'ChatInputText' &&
+        String(instance?.props?.chat?.groupChatId || '').toLowerCase() === expectedChatId
+      ) {
+        return Boolean(
+          typeof instance.setInputText === 'function' &&
+          typeof instance.getMessage === 'function' &&
+          typeof instance.handleSendMessage === 'function'
+        );
+      }
+    }
+    return false;
   })()`;
 }
 
@@ -1031,10 +1221,10 @@ export function isDesktopAttachmentMimeCompatible(
 }
 
 function extractEvaluationValue<T>(result: Record<string, unknown>): T {
+  if (result.exceptionDetails)
+    throw new Error("desktop CDP evaluation raised an exception");
   const outer = result.result as Record<string, unknown> | undefined;
   if (!outer) throw new Error("desktop CDP evaluation returned no result");
-  if (outer.exceptionDetails)
-    throw new Error("desktop CDP evaluation raised an exception");
   return outer.value as T;
 }
 
@@ -1130,12 +1320,23 @@ export class ExpressDesktopClient {
   async openAllowedChat(targetChatId?: string): Promise<boolean> {
     return this.withUiLock(async () => {
       const target = this.resolveTarget(targetChatId);
-      return this.evaluate<boolean>(buildOpenChatExpression(target.chatTitle));
+      await this.ensureTargetActive(target.chatId);
+      return true;
     });
   }
 
   async snapshotAllowed(targetChatId: string): Promise<DesktopSnapshot> {
     return this.withUiLock(() => this.ensureTargetActive(targetChatId));
+  }
+
+  async textActionAvailable(targetChatId: string): Promise<boolean> {
+    return this.withUiLock(async () => {
+      const target = this.resolveTarget(targetChatId);
+      await this.ensureTargetActive(target.chatId);
+      return this.evaluate<boolean>(
+        buildDesktopTextActionAvailableExpression(target.chatId),
+      );
+    });
   }
 
   assertSnapshotAllowed(
@@ -1162,66 +1363,52 @@ export class ExpressDesktopClient {
     const target = this.resolveTarget(targetChatId);
     const safeText = text.trim();
     if (!safeText) return "";
+    if (safeText.length > DEFAULT_DESKTOP_TEXT_CHUNK_LIMIT) {
+      throw new Error(
+        `desktop eXpress text exceeds the safe ${DEFAULT_DESKTOP_TEXT_CHUNK_LIMIT}-character limit`,
+      );
+    }
     const before = await this.ensureTargetActive(target.chatId);
     if (!before.composerReady)
       throw new Error("desktop message composer is unavailable");
-    if (!(await this.evaluate<boolean>(buildFocusComposerExpression()))) {
-      throw new Error("desktop message composer could not be focused");
-    }
-    const rpc = this.requireRpc();
-    await rpc.request("Input.dispatchKeyEvent", {
-      type: "rawKeyDown",
-      key: "a",
-      code: "KeyA",
-      windowsVirtualKeyCode: 65,
-      nativeVirtualKeyCode: 65,
-      modifiers: 2,
-    });
-    await rpc.request("Input.dispatchKeyEvent", {
-      type: "keyUp",
-      key: "a",
-      code: "KeyA",
-      modifiers: 2,
-    });
-    await rpc.request("Input.dispatchKeyEvent", {
-      type: "rawKeyDown",
-      key: "Backspace",
-      code: "Backspace",
-      windowsVirtualKeyCode: 8,
-      nativeVirtualKeyCode: 8,
-    });
-    await rpc.request("Input.dispatchKeyEvent", {
-      type: "keyUp",
-      key: "Backspace",
-      code: "Backspace",
-    });
-    await rpc.request("Input.insertText", { text: safeText });
-    await rpc.request("Input.dispatchKeyEvent", {
-      type: "rawKeyDown",
-      key: "Enter",
-      code: "Enter",
-      windowsVirtualKeyCode: 13,
-      nativeVirtualKeyCode: 13,
-    });
-    await rpc.request("Input.dispatchKeyEvent", {
-      type: "keyUp",
-      key: "Enter",
-      code: "Enter",
-    });
-    for (let attempt = 0; attempt < 20; attempt += 1) {
-      await new Promise((resolvePromise) => setTimeout(resolvePromise, 250));
-      const after = await this.snapshotUnlocked();
-      this.assertSnapshotAllowed(after, target.chatId);
-      if (
-        after.lastOwnMessageId &&
-        after.lastOwnMessageId !== before.lastOwnMessageId
-      ) {
-        return after.lastOwnMessageId;
+    try {
+      const dispatched = await this.evaluate<DesktopSendTextResult>(
+        buildDesktopSendTextExpression(target.chatId, safeText),
+      );
+      if (dispatched !== "sent") {
+        throw new Error(
+          `desktop native text send failed closed: ${dispatched}`,
+        );
       }
+      for (let attempt = 0; attempt < 20; attempt += 1) {
+        await new Promise((resolvePromise) => setTimeout(resolvePromise, 250));
+        const after = await this.snapshotUnlocked();
+        this.assertSnapshotAllowed(after, target.chatId);
+        const messageId = confirmedDesktopOutboundTextMessageId(
+          before,
+          after,
+          safeText,
+        );
+        if (messageId) return messageId;
+      }
+      throw new Error(
+        "desktop outbound message was not confirmed by the official client",
+      );
+    } catch (error) {
+      if (!(await this.recoverRendererIfNeededUnlocked())) throw error;
+      const afterRecovery = await this.ensureTargetActive(target.chatId, false);
+      const messageId = confirmedDesktopOutboundTextMessageId(
+        before,
+        afterRecovery,
+        safeText,
+      );
+      if (messageId) {
+        return messageId;
+      }
+      throw new Error(
+        "desktop outbound delivery state is unknown after renderer recovery; message was not retried",
+      );
     }
-    throw new Error(
-      "desktop outbound message was not confirmed by the official client",
-    );
   }
 
   async setTyping(targetChatId: string, active: boolean): Promise<void> {
@@ -1482,25 +1669,42 @@ export class ExpressDesktopClient {
   }
 
   /**
-   * Always select by exact title, then verify both UUID and title. This is
-   * deliberately done before every mutating/download operation, even when the
-   * requested chat already appears active.
+   * Route by exact UUID, then verify both UUID and title. This is deliberately
+   * done before every mutating/download operation, even when the requested
+   * chat already appears active.
    */
   private async ensureTargetActive(
     targetChatId: string,
+    allowRecovery = true,
   ): Promise<DesktopSnapshot> {
     const target = this.resolveTarget(targetChatId);
-    const opened = await this.evaluate<boolean>(
-      buildOpenChatExpression(target.chatTitle),
-    );
-    if (!opened) {
-      throw new Error("desktop allowlisted chat was not found");
+    let snapshot = await this.snapshotUnlocked();
+    if (snapshot.chatId?.toLowerCase() === target.chatId) {
+      this.assertSnapshotAllowed(snapshot, target.chatId);
+      return snapshot;
     }
-    for (let attempt = 0; attempt < 20; attempt += 1) {
+
+    let pageState = await this.pageStateUnlocked();
+    if (pageState.rendererError && allowRecovery) {
+      await this.reloadRendererUnlocked();
+      snapshot = await this.snapshotUnlocked();
+      pageState = await this.pageStateUnlocked();
+    }
+    if (!pageState.authenticated) {
+      throw new Error("official eXpress desktop client is not authenticated");
+    }
+
+    const opened = await this.evaluate<DesktopOpenChatResult>(
+      buildOpenChatExpression(target.chatId),
+    );
+    if (opened === "missing") {
+      throw new Error("desktop allowlisted chat UUID could not be routed");
+    }
+    for (let attempt = 0; attempt < 40; attempt += 1) {
       if (attempt) {
-        await new Promise((resolvePromise) => setTimeout(resolvePromise, 50));
+        await new Promise((resolvePromise) => setTimeout(resolvePromise, 100));
       }
-      const snapshot = await this.snapshotUnlocked();
+      snapshot = await this.snapshotUnlocked();
       if (
         snapshot.chatId?.toLowerCase() === target.chatId &&
         snapshot.chatTitle === target.chatTitle
@@ -1510,6 +1714,37 @@ export class ExpressDesktopClient {
       }
     }
     throw new Error("desktop active chat did not match the allowlisted target");
+  }
+
+  private async pageStateUnlocked(): Promise<DesktopPageState> {
+    return this.evaluate<DesktopPageState>(buildDesktopPageStateExpression());
+  }
+
+  private async recoverRendererIfNeededUnlocked(): Promise<boolean> {
+    const pageState = await this.pageStateUnlocked();
+    if (!pageState.rendererError) return false;
+    await this.reloadRendererUnlocked();
+    return true;
+  }
+
+  private async reloadRendererUnlocked(): Promise<void> {
+    await this.requireRpc().request(
+      "Page.reload",
+      { ignoreCache: false },
+      this.timeoutMs,
+    );
+    for (let attempt = 0; attempt < 60; attempt += 1) {
+      await new Promise((resolvePromise) => setTimeout(resolvePromise, 250));
+      try {
+        const state = await this.pageStateUnlocked();
+        if (state.authenticated && !state.rendererError) return;
+      } catch {
+        // Execution contexts are briefly unavailable while Electron reloads.
+      }
+    }
+    throw new Error(
+      "official eXpress desktop renderer did not recover after reload",
+    );
   }
 
   private async evaluate<T>(expression: string): Promise<T> {
@@ -1888,6 +2123,9 @@ export async function probeExpressDesktop(
       client.assertSnapshotAllowed(snapshot, chat.chatId);
       if (!snapshot.composerReady)
         return { ok: false, error: "desktop composer unavailable" };
+      if (!(await client.textActionAvailable(chat.chatId))) {
+        return { ok: false, error: "desktop native text action unavailable" };
+      }
     }
     return { ok: true };
   } catch (error) {

@@ -30,6 +30,7 @@ import {
 } from "./accounts.js";
 import { expressMessageActions } from "./actions.js";
 import { ExpressConfigSchema } from "./config-schema.js";
+import { DEFAULT_DESKTOP_TEXT_CHUNK_LIMIT } from "./desktop-cdp.js";
 import { toPlainText } from "./format.js";
 import {
   BOTX_INBOUND_DISABLED_MESSAGE,
@@ -226,7 +227,7 @@ export const expressPlugin: ChannelPlugin<ResolvedExpressAccount> = {
     chunker: (text: string, limit: number) =>
       getExpressRuntime().channel.text.chunkText(toPlainText(text), limit),
     chunkerMode: "text" as const,
-    textChunkLimit: 4000,
+    textChunkLimit: DEFAULT_DESKTOP_TEXT_CHUNK_LIMIT,
 
     sendText: async ({ cfg, to, text, accountId }) => {
       const account = resolveExpressAccount({ cfg, accountId });

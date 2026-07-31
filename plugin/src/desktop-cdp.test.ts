@@ -9,17 +9,23 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import type { ResolvedExpressAccount } from "./accounts.js";
 import {
   buildDesktopAttachmentChunkExpression,
   buildDesktopAttachmentStartExpression,
   buildDesktopAttachmentStatusExpression,
+  buildDesktopPageStateExpression,
   buildDesktopSendFileExpression,
+  buildDesktopSendTextExpression,
   buildDesktopSnapshotExpression,
+  buildDesktopTextActionAvailableExpression,
   buildDesktopTypingExpression,
+  buildOpenChatExpression,
   confirmedDesktopOutboundFileMessageId,
+  confirmedDesktopOutboundTextMessageId,
+  DEFAULT_DESKTOP_TEXT_CHUNK_LIMIT,
   DESKTOP_DOCUMENT_INPUT_SELECTOR,
   DESKTOP_IMAGE_INPUT_SELECTOR,
   DESKTOP_VIDEO_INPUT_SELECTOR,
@@ -89,6 +95,78 @@ describe("eXpress desktop CDP bridge", () => {
     await expect(
       client.sendText("00000000-0000-4000-8000-000000000099", "blocked"),
     ).rejects.toThrow(/not allowlisted/);
+    await expect(
+      client.sendText(chatId, "x".repeat(DEFAULT_DESKTOP_TEXT_CHUNK_LIMIT + 1)),
+    ).rejects.toThrow(/safe 1800-character limit/);
+  });
+
+  it("reloads a recognized renderer error once before UUID routing", async () => {
+    const chatId = "00000000-0000-4000-8000-000000000006";
+    const client = new ExpressDesktopClient({
+      cdpUrl: "http://127.0.0.1:18997",
+      chats: [{ chatId, chatTitle: "Approved" }],
+    });
+    const snapshot = {
+      authenticated: true,
+      chatId,
+      chatTitle: "Approved",
+      composerReady: true,
+      messages: [],
+      ownMessages: [],
+      lastOwnMessageId: null,
+    };
+    const rpcRequest = vi.fn().mockResolvedValue({});
+    const internals = client as unknown as {
+      rpc: { request: typeof rpcRequest; close: () => void };
+      evaluate: <T>(expression: string) => Promise<T>;
+    };
+    internals.rpc = { request: rpcRequest, close: () => undefined };
+    let snapshotCalls = 0;
+    let stateCalls = 0;
+    internals.evaluate = async <T>(expression: string): Promise<T> => {
+      if (expression.includes("chat-message-row--opponent")) {
+        snapshotCalls += 1;
+        return (
+          snapshotCalls === 1
+            ? {
+                ...snapshot,
+                authenticated: false,
+                chatId: null,
+                chatTitle: null,
+                composerReady: false,
+              }
+            : snapshot
+        ) as T;
+      }
+      if (expression.includes("rendererError")) {
+        stateCalls += 1;
+        return (
+          stateCalls === 1
+            ? {
+                authenticated: false,
+                chatListReady: false,
+                rendererError: true,
+              }
+            : {
+                authenticated: true,
+                chatListReady: true,
+                rendererError: false,
+              }
+        ) as T;
+      }
+      if (expression.includes("history.push('/chats/'")) {
+        return "active" as T;
+      }
+      throw new Error("unexpected expression");
+    };
+
+    await expect(client.snapshotAllowed(chatId)).resolves.toEqual(snapshot);
+    expect(rpcRequest).toHaveBeenCalledOnce();
+    expect(rpcRequest).toHaveBeenCalledWith(
+      "Page.reload",
+      { ignoreCache: false },
+      10_000,
+    );
   });
 
   it("accepts only loopback CDP endpoints", () => {
@@ -133,6 +211,159 @@ describe("eXpress desktop CDP bridge", () => {
     expect(expression).toContain("split(/\\r?\\n/, 1)");
     expect(expression).not.toContain(".click()");
     expect(expression).not.toContain("Input.insertText");
+  });
+
+  it("recognizes the renderer error page without confusing an active client", () => {
+    const run = (bodyText: string, selectors: Set<string>) =>
+      Function(
+        "document",
+        `return (${buildDesktopPageStateExpression()});`,
+      )({
+        body: { innerText: bodyText },
+        querySelector: (selector: string) =>
+          selectors.has(selector) ? {} : null,
+      }) as {
+        authenticated: boolean;
+        chatListReady: boolean;
+        rendererError: boolean;
+      };
+
+    expect(run("Something went wrong", new Set())).toEqual({
+      authenticated: false,
+      chatListReady: false,
+      rendererError: true,
+    });
+    expect(
+      run("Something went wrong in an old message", new Set([".chat"])),
+    ).toEqual({
+      authenticated: false,
+      chatListReady: false,
+      rendererError: false,
+    });
+    expect(
+      run(
+        "normal client",
+        new Set([".settings-button__avatar", ".chat-list-entry"]),
+      ),
+    ).toEqual({
+      authenticated: true,
+      chatListReady: true,
+      rendererError: false,
+    });
+  });
+
+  it("routes by exact chat UUID and never by a lookalike title", () => {
+    const chatA = "00000000-0000-4000-8000-000000000001";
+    const chatB = "00000000-0000-4000-8000-000000000002";
+    const clicks: string[] = [];
+    const entry = (chatId: string, title: string) => {
+      const node = {
+        title,
+        click: () => clicks.push(chatId),
+      };
+      Object.defineProperty(node, "__reactFiber$fixture", {
+        value: {
+          memoizedProps: { chat: { groupChatId: chatId } },
+          return: null,
+        },
+      });
+      return node;
+    };
+    const entries = [entry(chatA, "Same title"), entry(chatB, "Same title")];
+    const result = Function(
+      "document",
+      `return (${buildOpenChatExpression(chatB)});`,
+    )({
+      body: {},
+      getElementById: () => null,
+      querySelector: () => null,
+      querySelectorAll: (selector: string) =>
+        selector === ".chat-list-entry" ? entries : [],
+    });
+
+    expect(result).toBe("entry");
+    expect(clicks).toEqual([chatB]);
+    expect(buildOpenChatExpression(chatB)).not.toContain(
+      ".chat-list-entry__name",
+    );
+  });
+
+  it("uses the official router for an off-screen exact chat UUID", () => {
+    const chatId = "00000000-0000-4000-8000-000000000003";
+    const paths: string[] = [];
+    const root = {};
+    Object.defineProperty(root, "__reactFiber$fixture", {
+      value: {
+        memoizedProps: {
+          history: {
+            location: { pathname: "/chats/current" },
+            push: (path: string) => paths.push(path),
+          },
+        },
+        return: null,
+      },
+    });
+    const result = Function(
+      "document",
+      `return (${buildOpenChatExpression(chatId)});`,
+    )({
+      body: {},
+      getElementById: () => null,
+      querySelector: (selector: string) =>
+        selector === ".chat-list" ? root : null,
+      querySelectorAll: () => [],
+    });
+
+    expect(result).toBe("router");
+    expect(paths).toEqual([`/chats/${chatId}`]);
+  });
+
+  it("sends text only through the exact ChatInputText native contract", async () => {
+    const chatId = "00000000-0000-4000-8000-000000000004";
+    const sent: string[] = [];
+    let draft = { text: "", mentions: [] as unknown[] };
+    const editor = { focus: vi.fn() };
+    Object.defineProperty(editor, "__reactFiber$fixture", {
+      value: {
+        elementType: { displayName: "ChatInputText" },
+        stateNode: {
+          props: { chat: { groupChatId: chatId } },
+          setInputText: (value: typeof draft) => {
+            draft = value;
+          },
+          getMessage: () => draft,
+          handleSendMessage: () => sent.push(draft.text),
+        },
+        return: null,
+      },
+    });
+    const run = (targetChatId: string, text: string) =>
+      Function(
+        "document",
+        "setTimeout",
+        `return (${buildDesktopSendTextExpression(targetChatId, text)});`,
+      )({ querySelector: () => editor }, (callback: () => void) => {
+        callback();
+        return 0;
+      }) as Promise<string>;
+
+    await expect(run(chatId, "line one\nline two")).resolves.toBe("sent");
+    expect(sent).toEqual(["line one\nline two"]);
+    expect(editor.focus).toHaveBeenCalledOnce();
+    await expect(
+      run("00000000-0000-4000-8000-000000000005", "blocked"),
+    ).resolves.toBe("chat-mismatch");
+    expect(sent).toEqual(["line one\nline two"]);
+    const available = (targetChatId: string) =>
+      Function(
+        "document",
+        `return (${buildDesktopTextActionAvailableExpression(targetChatId)});`,
+      )({ querySelector: () => editor });
+    expect(available(chatId)).toBe(true);
+    expect(available("00000000-0000-4000-8000-000000000005")).toBe(false);
+    expect(buildDesktopSendTextExpression(chatId, "safe")).not.toContain(
+      "Input.insertText",
+    );
   });
 
   it("invokes only the exact official-client native typing action", () => {
@@ -1179,6 +1410,46 @@ describe("eXpress desktop CDP bridge", () => {
         size: 4_309,
         kind: "image",
       }),
+    ).toBeNull();
+  });
+
+  it("confirms only a new own text message with the exact normalized body", () => {
+    const oldId = "00000000-0000-4000-8000-000000000051";
+    const deliveredId = "00000000-0000-4000-8000-000000000052";
+    const before = {
+      ownMessages: [
+        {
+          id: oldId,
+          senderId: "",
+          type: "text" as const,
+          text: "same text",
+        },
+      ],
+    };
+    const after = {
+      ownMessages: [
+        ...before.ownMessages,
+        {
+          id: deliveredId,
+          senderId: "",
+          type: "text" as const,
+          text: "line one\nline two",
+        },
+      ],
+    };
+
+    expect(
+      confirmedDesktopOutboundTextMessageId(
+        before,
+        after,
+        "line one\r\nline two",
+      ),
+    ).toBe(deliveredId);
+    expect(
+      confirmedDesktopOutboundTextMessageId(before, after, "same text"),
+    ).toBeNull();
+    expect(
+      confirmedDesktopOutboundTextMessageId(before, after, "different"),
     ).toBeNull();
   });
 

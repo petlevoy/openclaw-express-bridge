@@ -1,5 +1,28 @@
 # Release notes
 
+## 1.1.10
+
+- Ships eXpress plugin 2.3.2 with UUID-first desktop navigation, bounded
+  renderer recovery and safer text delivery for the official client 3.68.x.
+- Routes mounted chats by their React `groupChatId` and uses the official
+  router for virtualized/off-screen entries. The configured title remains a
+  mandatory post-navigation identity check and is no longer the selector.
+- Detects the fatal “Something went wrong” renderer state before reporting an
+  authentication or missing-chat failure, performs one controlled `Page.reload`
+  and waits for the authenticated UI to return.
+- Sends through the verified native `ChatInputText` component instead of a
+  single synthetic `Input.insertText` payload. Text chunks are capped at 1,800
+  characters, including deployments with a larger legacy configured limit.
+- Confirms a new outbound text by both message ID and exact normalized body.
+  After renderer recovery an unresolved send fails closed and is not blindly
+  retried, avoiding duplicate replies.
+- Bounds multi-chat UI switches to one per second. The previous full-cycle
+  interval was divided by the chat count, making three configured chats force a
+  route change about every 333 ms and keeping the renderer CPU/memory hot.
+- Adds regression coverage for UUID selection, router fallback, renderer-state
+  classification, native text sending, chunk limits and exact delivery
+  reconciliation. The automated suite performs no live eXpress send.
+
 ## 1.1.9
 
 - Ships eXpress plugin 2.3.1 with priority cancellation and reload-safe inbound

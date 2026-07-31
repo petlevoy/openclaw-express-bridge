@@ -8,6 +8,7 @@ import { DesktopDedupeStore, type DesktopMessage } from "./desktop-cdp.js";
 import {
   DesktopActiveSessionRegistry,
   DesktopInboundAttachmentError,
+  desktopPollSliceMs,
   desktopStatePathForChat,
   isDesktopPriorityAbortMessage,
   processDesktopInboundEvent,
@@ -24,6 +25,12 @@ const message = (suffix: string, type: DesktopMessage["type"] = "document") =>
   }) satisfies DesktopMessage;
 
 describe("desktop inbound event isolation", () => {
+  it("bounds multi-chat UI switching without slowing a single chat", () => {
+    expect(desktopPollSliceMs(250, 1)).toBe(250);
+    expect(desktopPollSliceMs(1_000, 3)).toBe(1_000);
+    expect(desktopPollSliceMs(6_000, 3)).toBe(2_000);
+  });
+
   it("recognizes only standalone text abort commands as priority events", () => {
     expect(
       isDesktopPriorityAbortMessage({

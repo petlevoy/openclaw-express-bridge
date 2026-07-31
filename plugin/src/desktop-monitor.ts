@@ -13,6 +13,7 @@ import {
 } from "./desktop-ack.js";
 import {
   DEFAULT_DESKTOP_MEDIA_MAX_MB,
+  DEFAULT_DESKTOP_TEXT_CHUNK_LIMIT,
   desktopClientFromAccount,
   DesktopDedupeStore,
   type DesktopMessage,
@@ -35,7 +36,19 @@ import { getExpressRuntime } from "./runtime.js";
 import type { DesktopChatConfig } from "./types.js";
 
 export const DESKTOP_INBOUND_EVENT_MAX_ATTEMPTS = 3;
+export const MIN_DESKTOP_CHAT_SWITCH_INTERVAL_MS = 1_000;
 const DEFAULT_DESKTOP_DISPATCH_CONCURRENCY = 2;
+
+export function desktopPollSliceMs(
+  pollIntervalMs: number,
+  chatCount: number,
+): number {
+  if (chatCount <= 1) return pollIntervalMs;
+  return Math.max(
+    MIN_DESKTOP_CHAT_SWITCH_INTERVAL_MS,
+    Math.floor(pollIntervalMs / chatCount),
+  );
+}
 
 export class DesktopInboundAttachmentError extends Error {
   constructor(readonly detail: unknown) {
@@ -156,6 +169,9 @@ function isDesktopTransportFailure(error: unknown): boolean {
     message === "active desktop chat UUID is not allowlisted" ||
     message === "active desktop chat title is not allowlisted" ||
     message === "desktop allowlisted chat was not found" ||
+    message === "desktop allowlisted chat UUID could not be routed" ||
+    message ===
+      "official eXpress desktop renderer did not recover after reload" ||
     message === "desktop active chat did not match the allowlisted target"
   );
 }
@@ -278,10 +294,7 @@ export async function startExpressDesktopMonitor(
   }
 
   const pollIntervalMs = account.config.desktopPollIntervalMs ?? 1000;
-  const pollSliceMs = Math.max(
-    100,
-    Math.floor(pollIntervalMs / chatRuntimes.length),
-  );
+  const pollSliceMs = desktopPollSliceMs(pollIntervalMs, chatRuntimes.length);
   const client = desktopClientFromAccount(account);
   const rateLimiter = new DesktopDispatchRateLimiter();
   const activeSessions = new DesktopActiveSessionRegistry(
@@ -737,7 +750,11 @@ async function dispatchDesktopInbound(
           if (payload.text?.trim()) {
             const chunks = core.channel.text.chunkText(
               toPlainText(payload.text).trim(),
-              account.config.textChunkLimit ?? 4000,
+              Math.min(
+                account.config.textChunkLimit ??
+                  DEFAULT_DESKTOP_TEXT_CHUNK_LIMIT,
+                DEFAULT_DESKTOP_TEXT_CHUNK_LIMIT,
+              ),
             );
             for (const chunk of chunks) {
               assertDesktopMonitorActive(abortSignal);

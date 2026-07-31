@@ -1,4 +1,4 @@
-# openclaw-express-bridge 1.1.9
+# openclaw-express-bridge 1.1.10
 
 `openclaw-express-bridge` is an enterprise AI integration layer that connects
 OpenClaw agents to on-premises eXpress deployments through the official Linux
@@ -48,7 +48,7 @@ grant was found in the client payload.
 Debian package:
 
 ```bash
-sudo apt install ./openclaw-express-bridge_1.1.9_amd64.deb
+sudo apt install ./openclaw-express-bridge_1.1.10_amd64.deb
 openclaw-express-bridge install
 openclaw-express-bridge install-client
 ```
@@ -56,8 +56,8 @@ openclaw-express-bridge install-client
 Portable archive:
 
 ```bash
-tar -xzf openclaw-express-bridge-1.1.9-linux-amd64.tar.gz
-cd openclaw-express-bridge-1.1.9
+tar -xzf openclaw-express-bridge-1.1.10-linux-amd64.tar.gz
+cd openclaw-express-bridge-1.1.10
 ./install.sh
 ~/.local/bin/openclaw-express-bridge install-client
 ```
@@ -115,7 +115,7 @@ checks what it needs but does not run a package manager.
 
 ## Multiple direct chats through one desktop session
 
-Plugin 2.3.1 supports `desktopChats`, an exact array allowlist that takes precedence
+Plugin 2.3.2 supports `desktopChats`, an exact array allowlist that takes precedence
 over the legacy `desktopChatId`, `desktopChatTitle`, `desktopSenderId` and
 `desktopSenderName` fields. One monitor and one official desktop client/CDP
 serve all enabled entries. Do not run a second monitor or desktop client against
@@ -175,7 +175,24 @@ inbound event.
 The monitor polls chats round-robin. Desktop UI actions share one global async
 mutex, while agent work runs outside it. Each chat has a sequential bounded
 queue and its own durable dedupe/retry/quarantine state. Different chats may run
-independently, with shared model concurrency defaulting to 2.
+independently, with shared model concurrency defaulting to 2. Multi-chat mode
+waits at least one second between visible chat switches, preventing the
+configured full-cycle interval from turning into sub-second UI thrash as more
+chats are added. A single chat retains its configured poll interval.
+
+Every desktop operation routes by the configured chat UUID, including a bounded
+official-router fallback for entries outside the rendered chat list. The title
+is a second, fail-closed identity check after navigation; it is never the
+selector. Do not run raw CDP scripts alongside the bridge because a separate
+process cannot participate in its endpoint-wide UI mutex.
+
+Desktop text is limited to 1,800 characters per chunk. The bridge writes and
+sends through the official client's verified `ChatInputText` component instead
+of injecting one large synthetic keyboard payload into Slate. If the client
+shows its fatal “Something went wrong” screen, the bridge performs one
+controlled renderer reload and waits for authentication. A send interrupted by
+that recovery is reconciled against a new exact own-message ID and body; an
+unresolved delivery is not blindly retried.
 
 ### Cancellation, reloads and long-running work
 
@@ -351,7 +368,7 @@ streaming. Non-loopback CTS endpoints must use HTTPS.
 
 ## Feature scope matrix
 
-| Requirement | 1.1.9 state |
+| Requirement | 1.1.10 state |
 |---|---|
 | Native OpenClaw channel lifecycle | Implemented |
 | Default/named account configuration | Implemented; multiple chats share one serialized desktop client/CDP session |
