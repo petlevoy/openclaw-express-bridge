@@ -50,6 +50,31 @@ export function desktopPollSliceMs(
   );
 }
 
+export function resolveDesktopDurableTextDelivery(
+  chatId: string,
+  payload: {
+    text?: string;
+    mediaUrl?: string;
+    mediaUrls?: string[];
+  },
+  kind: string,
+) {
+  if (kind !== "final" || !payload.text?.trim()) return false;
+  const media = payload.mediaUrls?.length
+    ? payload.mediaUrls
+    : payload.mediaUrl
+      ? [payload.mediaUrl]
+      : [];
+  if (media.length > 0) return false;
+  return {
+    to: `express:${chatId}`,
+    requiredCapabilities: {
+      text: true as const,
+      reconcileUnknownSend: true as const,
+    },
+  };
+}
+
 export class DesktopInboundAttachmentError extends Error {
   constructor(readonly detail: unknown) {
     super("desktop inbound attachment processing failed");
@@ -709,18 +734,6 @@ async function dispatchDesktopInbound(
     MediaTypes: mediaTypes.length ? mediaTypes : undefined,
   });
 
-  void core.channel.session
-    .recordSessionMetaFromInbound({
-      storePath,
-      sessionKey: ctxPayload.SessionKey ?? route.sessionKey,
-      ctx: ctxPayload,
-    })
-    .catch((error) => {
-      log?.error?.(
-        `[${account.accountId}] Failed updating desktop session meta: ${redactDesktopError(error)}`,
-      );
-    });
-
   const { onModelSelected, ...prefixOptions } = createReplyPrefixOptions({
     cfg: config,
     agentId: route.agentId,
@@ -729,11 +742,30 @@ async function dispatchDesktopInbound(
   });
 
   const dispatch = () =>
-    core.channel.reply.dispatchReplyWithBufferedBlockDispatcher({
-      ctx: ctxPayload,
+    core.channel.inbound.dispatchReply({
       cfg: config,
-      dispatcherOptions: {
-        ...prefixOptions,
+      channel: "express",
+      accountId: account.accountId,
+      agentId: route.agentId,
+      routeSessionKey: route.sessionKey,
+      storePath,
+      ctxPayload,
+      recordInboundSession: core.channel.session.recordInboundSession,
+      dispatchReplyWithBufferedBlockDispatcher:
+        core.channel.reply.dispatchReplyWithBufferedBlockDispatcher,
+      delivery: {
+        durable: async (payload, info) => {
+          const durableDelivery = resolveDesktopDurableTextDelivery(
+            chat.chatId,
+            payload,
+            info.kind,
+          );
+          if (!durableDelivery) return false;
+          await acknowledgement?.stop();
+          assertDesktopMonitorActive(abortSignal);
+          if (!(await isDesktopOutboundUnlocked(account))) return false;
+          return durableDelivery;
+        },
         deliver: async (payload: {
           text?: string;
           mediaUrls?: string[];
@@ -794,13 +826,27 @@ async function dispatchDesktopInbound(
             statusSink?.({ lastOutboundAt: Date.now() });
           }
         },
+        onDelivered: (_payload, _info, result) => {
+          if (result?.visibleReplySent !== false) {
+            statusSink?.({ lastOutboundAt: Date.now() });
+          }
+        },
         onError: (error, info) => {
           log?.error?.(
             `[${account.accountId}] ${info.kind} desktop reply failed chat=${chat.chatId}: ${redactDesktopError(error)}`,
           );
         },
       },
+      replyPipeline: {},
+      dispatcherOptions: prefixOptions,
       replyOptions: { onModelSelected },
+      record: {
+        onRecordError: (error) => {
+          log?.error?.(
+            `[${account.accountId}] Failed updating desktop session meta: ${redactDesktopError(error)}`,
+          );
+        },
+      },
     });
   if (activeSessions) {
     await activeSessions.run(route.sessionKey, dispatch);

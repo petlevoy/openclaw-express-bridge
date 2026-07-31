@@ -1,5 +1,14 @@
 # Release notes
 
+## 1.1.13
+
+- Ships eXpress plugin 2.3.5 and migrates desktop inbound replies to the
+  current OpenClaw channel-turn dispatcher. OpenClaw 2026.7.1 no longer runs a
+  `deliver` callback nested in the legacy buffered-dispatcher options; the old
+  path could finish the model turn without sending its final reply.
+- Final text replies now enter the durable message adapter and its exact-send
+  reconciliation journal. Media replies retain the verified direct fallback.
+
 ## 1.1.12
 
 - Ships eXpress plugin 2.3.4 with a native durable text adapter. Before the

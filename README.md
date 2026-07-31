@@ -1,4 +1,4 @@
-# openclaw-express-bridge 1.1.12
+# openclaw-express-bridge 1.1.13
 
 `openclaw-express-bridge` is an enterprise AI integration layer that connects
 OpenClaw agents to on-premises eXpress deployments through the official Linux
@@ -48,7 +48,7 @@ grant was found in the client payload.
 Debian package:
 
 ```bash
-sudo apt install ./openclaw-express-bridge_1.1.12_amd64.deb
+sudo apt install ./openclaw-express-bridge_1.1.13_amd64.deb
 openclaw-express-bridge install
 openclaw-express-bridge install-client
 ```
@@ -56,8 +56,8 @@ openclaw-express-bridge install-client
 Portable archive:
 
 ```bash
-tar -xzf openclaw-express-bridge-1.1.12-linux-amd64.tar.gz
-cd openclaw-express-bridge-1.1.12
+tar -xzf openclaw-express-bridge-1.1.13-linux-amd64.tar.gz
+cd openclaw-express-bridge-1.1.13
 ./install.sh
 ~/.local/bin/openclaw-express-bridge install-client
 ```
@@ -115,7 +115,7 @@ checks what it needs but does not run a package manager.
 
 ## Multiple direct chats through one desktop session
 
-Plugin 2.3.4 supports `desktopChats`, an exact array allowlist that takes precedence
+Plugin 2.3.5 supports `desktopChats`, an exact array allowlist that takes precedence
 over the legacy `desktopChatId`, `desktopChatTitle`, `desktopSenderId` and
 `desktopSenderName` fields. One monitor and one official desktop client/CDP
 serve all enabled entries. Do not run a second monitor or desktop client against
@@ -368,7 +368,7 @@ streaming. Non-loopback CTS endpoints must use HTTPS.
 
 ## Feature scope matrix
 
-| Requirement | 1.1.12 state |
+| Requirement | 1.1.13 state |
 |---|---|
 | Native OpenClaw channel lifecycle | Implemented |
 | Default/named account configuration | Implemented; multiple chats share one serialized desktop client/CDP session |

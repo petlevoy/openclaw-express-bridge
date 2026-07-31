@@ -12,6 +12,7 @@ import {
   desktopStatePathForChat,
   isDesktopPriorityAbortMessage,
   processDesktopInboundEvent,
+  resolveDesktopDurableTextDelivery,
   validateDesktopExactAllowlist,
 } from "./desktop-monitor.js";
 
@@ -29,6 +30,29 @@ describe("desktop inbound event isolation", () => {
     expect(desktopPollSliceMs(250, 1)).toBe(250);
     expect(desktopPollSliceMs(1_000, 3)).toBe(1_000);
     expect(desktopPollSliceMs(6_000, 3)).toBe(2_000);
+  });
+
+  it("routes final text through durable delivery and leaves media on fallback", () => {
+    const chatId = "00000000-0000-4000-8000-000000000001";
+    expect(
+      resolveDesktopDurableTextDelivery(chatId, { text: "reply" }, "final"),
+    ).toEqual({
+      to: `express:${chatId}`,
+      requiredCapabilities: {
+        text: true,
+        reconcileUnknownSend: true,
+      },
+    });
+    expect(
+      resolveDesktopDurableTextDelivery(
+        chatId,
+        { text: "caption", mediaUrl: "/tmp/file.pdf" },
+        "final",
+      ),
+    ).toBe(false);
+    expect(
+      resolveDesktopDurableTextDelivery(chatId, { text: "progress" }, "tool"),
+    ).toBe(false);
   });
 
   it("recognizes only standalone text abort commands as priority events", () => {
