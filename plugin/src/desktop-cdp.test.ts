@@ -169,6 +169,71 @@ describe("eXpress desktop CDP bridge", () => {
     );
   });
 
+  it("waits through a transient official-client renderer reload", async () => {
+    const chatId = "00000000-0000-4000-8000-000000000007";
+    const client = new ExpressDesktopClient({
+      cdpUrl: "http://127.0.0.1:18997",
+      chats: [{ chatId, chatTitle: "Approved" }],
+    });
+    const snapshot = {
+      authenticated: true,
+      chatId,
+      chatTitle: "Approved",
+      composerReady: true,
+      messages: [],
+      ownMessages: [],
+      lastOwnMessageId: null,
+    };
+    const rpcRequest = vi.fn().mockResolvedValue({});
+    const internals = client as unknown as {
+      rpc: { request: typeof rpcRequest; close: () => void };
+      evaluate: <T>(expression: string) => Promise<T>;
+    };
+    internals.rpc = { request: rpcRequest, close: () => undefined };
+    let snapshotCalls = 0;
+    let stateCalls = 0;
+    internals.evaluate = async <T>(expression: string): Promise<T> => {
+      if (expression.includes("chat-message-row--opponent")) {
+        snapshotCalls += 1;
+        return (
+          snapshotCalls === 1
+            ? {
+                ...snapshot,
+                authenticated: false,
+                chatId: null,
+                chatTitle: null,
+                composerReady: false,
+              }
+            : snapshot
+        ) as T;
+      }
+      if (expression.includes("rendererError")) {
+        stateCalls += 1;
+        return (
+          stateCalls === 1
+            ? {
+                authenticated: false,
+                chatListReady: false,
+                rendererError: false,
+              }
+            : {
+                authenticated: true,
+                chatListReady: true,
+                rendererError: false,
+              }
+        ) as T;
+      }
+      if (expression.includes("history.push('/chats/'")) {
+        return "active" as T;
+      }
+      throw new Error("unexpected expression");
+    };
+
+    await expect(client.snapshotAllowed(chatId)).resolves.toEqual(snapshot);
+    expect(stateCalls).toBe(2);
+    expect(rpcRequest).not.toHaveBeenCalled();
+  });
+
   it("accepts only loopback CDP endpoints", () => {
     expect(normalizeLoopbackCdpUrl("http://127.0.0.1:18997/")).toBe(
       "http://127.0.0.1:18997",
@@ -322,6 +387,7 @@ describe("eXpress desktop CDP bridge", () => {
     const chatId = "00000000-0000-4000-8000-000000000004";
     const sent: string[] = [];
     let draft = { text: "", mentions: [] as unknown[] };
+    let getMessageCalls = 0;
     const editor = { focus: vi.fn() };
     Object.defineProperty(editor, "__reactFiber$fixture", {
       value: {
@@ -331,7 +397,12 @@ describe("eXpress desktop CDP bridge", () => {
           setInputText: (value: typeof draft) => {
             draft = value;
           },
-          getMessage: () => draft,
+          getMessage: () => {
+            getMessageCalls += 1;
+            return getMessageCalls < 4
+              ? { text: "", mentions: [] as unknown[] }
+              : draft;
+          },
           handleSendMessage: () => sent.push(draft.text),
         },
         return: null,
@@ -349,6 +420,7 @@ describe("eXpress desktop CDP bridge", () => {
 
     await expect(run(chatId, "line one\nline two")).resolves.toBe("sent");
     expect(sent).toEqual(["line one\nline two"]);
+    expect(getMessageCalls).toBe(4);
     expect(editor.focus).toHaveBeenCalledOnce();
     await expect(
       run("00000000-0000-4000-8000-000000000005", "blocked"),

@@ -133,6 +133,9 @@ export const DESKTOP_VIDEO_INPUT_SELECTOR =
   'input[id^="video-input"][type="file"][accept="video/*"]';
 export const DESKTOP_TYPING_FAILSAFE_MS = 8_000;
 export const DEFAULT_DESKTOP_TEXT_CHUNK_LIMIT = 1_800;
+export const DESKTOP_COMPOSER_SYNC_ATTEMPTS = 20;
+export const DESKTOP_COMPOSER_SYNC_POLL_MS = 100;
+export const DESKTOP_RENDERER_AUTH_WAIT_ATTEMPTS = 60;
 
 export interface DesktopPageState {
   authenticated: boolean;
@@ -858,13 +861,18 @@ export function buildDesktopSendTextExpression(
       }
       editor.focus();
       instance.setInputText({ text: expectedText, mentions: [] });
-      await new Promise((resolvePromise) => setTimeout(resolvePromise, 100));
-      const message = instance.getMessage();
-      if (String(message?.text || '').replace(/\\r\\n/g, '\\n') !== expectedText.replace(/\\r\\n/g, '\\n')) {
-        return 'text-mismatch';
+      for (let attempt = 0; attempt < ${DESKTOP_COMPOSER_SYNC_ATTEMPTS}; attempt += 1) {
+        const message = instance.getMessage();
+        const actualText = String(message?.text || '')
+          .replace(/\\r\\n/g, '\\n')
+          .replace(/\\n$/, '');
+        if (actualText === expectedText.replace(/\\r\\n/g, '\\n')) {
+          instance.handleSendMessage();
+          return 'sent';
+        }
+        await new Promise((resolvePromise) => setTimeout(resolvePromise, ${DESKTOP_COMPOSER_SYNC_POLL_MS}));
       }
-      instance.handleSendMessage();
-      return 'sent';
+      return 'text-mismatch';
     }
     return 'native-action-missing';
   })()`;
@@ -1689,6 +1697,23 @@ export class ExpressDesktopClient {
       await this.reloadRendererUnlocked();
       snapshot = await this.snapshotUnlocked();
       pageState = await this.pageStateUnlocked();
+    }
+    if (!pageState.authenticated && allowRecovery) {
+      for (
+        let attempt = 0;
+        attempt < DESKTOP_RENDERER_AUTH_WAIT_ATTEMPTS;
+        attempt += 1
+      ) {
+        await new Promise((resolvePromise) => setTimeout(resolvePromise, 250));
+        pageState = await this.pageStateUnlocked();
+        if (pageState.authenticated) break;
+        if (pageState.rendererError) {
+          await this.reloadRendererUnlocked();
+          snapshot = await this.snapshotUnlocked();
+          pageState = await this.pageStateUnlocked();
+          break;
+        }
+      }
     }
     if (!pageState.authenticated) {
       throw new Error("official eXpress desktop client is not authenticated");

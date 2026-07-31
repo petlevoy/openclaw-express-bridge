@@ -1,5 +1,18 @@
 # Release notes
 
+## 1.1.11
+
+- Ships eXpress plugin 2.3.3 and fixes live outbound
+  `desktop native text send failed closed: text-mismatch` failures.
+- Polls the official `ChatInputText.getMessage()` contract for up to two
+  seconds after `setInputText()` instead of assuming Slate synchronizes within
+  100 ms. The existing exact-text verification and fail-closed send remain.
+- Waits up to 15 seconds for the authorized UI during the official client's
+  periodic memory-clean renderer reload instead of immediately entering
+  reconnect backoff and losing the acknowledgement window.
+- Retains the compatible trailing editor-newline normalization discovered in
+  the live client and adds delayed-composer and transient-reload regressions.
+
 ## 1.1.10
 
 - Ships eXpress plugin 2.3.2 with UUID-first desktop navigation, bounded
