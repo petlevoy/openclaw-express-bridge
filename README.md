@@ -115,7 +115,7 @@ checks what it needs but does not run a package manager.
 
 ## Multiple direct chats through one desktop session
 
-Plugin 2.3.5 supports `desktopChats`, an exact array allowlist that takes precedence
+Plugin 2.3.6 supports `desktopChats`, an exact array allowlist that takes precedence
 over the legacy `desktopChatId`, `desktopChatTitle`, `desktopSenderId` and
 `desktopSenderName` fields. One monitor and one official desktop client/CDP
 serve all enabled entries. Do not run a second monitor or desktop client against

@@ -1,5 +1,14 @@
 # Release notes
 
+## 1.1.14
+
+- Ships eXpress plugin 2.3.6 and splits native composer staging from commit
+  into bounded synchronous CDP evaluations. This prevents Chromium's
+  `Promise was collected` failure from leaving an ambiguous send attempt.
+- Outbound confirmation now waits for the official client's terminal
+  `sent`, `received` or `read` state instead of accepting a transient
+  `sending` bubble that can disappear during rapid multi-part replies.
+
 ## 1.1.13
 
 - Ships eXpress plugin 2.3.5 and migrates desktop inbound replies to the

@@ -64,6 +64,8 @@ export interface DesktopMessage {
   senderId: string;
   type: "text" | "document" | "image" | "audio" | "voice" | "video";
   text: string;
+  /** Official-client delivery state for own messages, when rendered. */
+  deliveryStatus?: string;
   attachment?: DesktopAttachment;
 }
 
@@ -155,6 +157,9 @@ export type DesktopSendTextResult =
   | "native-action-missing"
   | "chat-mismatch"
   | "text-mismatch";
+
+export type DesktopPrepareTextResult =
+  "prepared" | "composer-missing" | "native-action-missing" | "chat-mismatch";
 
 interface DedupeState {
   version: 2 | 3 | 4 | 5;
@@ -378,6 +383,8 @@ export function confirmedDesktopOutboundTextMessageId(
     (message) =>
       !previousIds.has(message.id) &&
       message.type === "text" &&
+      (message.deliveryStatus == null ||
+        ["sent", "received", "read"].includes(message.deliveryStatus)) &&
       normalizeDesktopOutboundText(message.text) === expectedText,
   );
   return delivered?.id ?? null;
@@ -697,7 +704,11 @@ export function buildDesktopSnapshotExpression(): string {
       const type = node?.getAttribute?.('data-message-type');
       if (!supportedTypes.has(type)) return null;
       const text = String(message?.payload?.body || node.querySelector('.chat-message__text')?.innerText || '').trim();
-      if (type === 'text') return { id, senderId, type, text };
+      const statusClass = own
+        ? String(node.querySelector('.chat-message__status')?.className || '')
+        : '';
+      const deliveryStatus = statusClass.match(/(?:^|\s)chat-message__status--([a-z-]+)/)?.[1];
+      if (type === 'text') return { id, senderId, type, text, deliveryStatus };
       const file = findFilePayload(message, !own);
       if (!file) return null;
       const mimeType = String(file?.fileMimeType || 'application/octet-stream').trim().toLowerCase();
@@ -706,6 +717,7 @@ export function buildDesktopSnapshotExpression(): string {
         senderId,
         type,
         text,
+        deliveryStatus,
         attachment: {
           fileId: String(file?.fileId || id).trim(),
           fileName: String(file?.fileName || '').trim(),
@@ -826,17 +838,17 @@ export function buildOpenChatExpression(chatId: string): string {
 }
 
 /**
- * Use the official class component's text/send contract instead of synthetic
- * keyboard input. This avoids the client 3.68.x Slate crash on large multiline
- * Input.insertText payloads while retaining exact chat verification.
+ * Stage text through the official class component instead of synthetic input.
+ * Composer synchronization is polled by Node in separate Runtime.evaluate
+ * calls so Chromium cannot collect a long-lived page promise mid-send.
  */
-export function buildDesktopSendTextExpression(
+export function buildDesktopPrepareTextExpression(
   chatId: string,
   text: string,
 ): string {
   const expectedChatId = JSON.stringify(chatId.toLowerCase());
   const expectedText = JSON.stringify(text);
-  return `(async () => {
+  return `(() => {
     const expectedChatId = ${expectedChatId};
     const expectedText = ${expectedText};
     const editor = document.querySelector('.slate-message-input[contenteditable="true"]');
@@ -866,18 +878,55 @@ export function buildDesktopSendTextExpression(
       }
       editor.focus();
       instance.setInputText({ text: expectedText, mentions: [] });
-      for (let attempt = 0; attempt < ${DESKTOP_COMPOSER_SYNC_ATTEMPTS}; attempt += 1) {
-        const message = instance.getMessage();
-        const actualText = String(message?.text || '')
-          .replace(/\\r\\n/g, '\\n')
-          .replace(/\\n$/, '');
-        if (actualText === expectedText.replace(/\\r\\n/g, '\\n')) {
-          instance.handleSendMessage();
-          return 'sent';
-        }
-        await new Promise((resolvePromise) => setTimeout(resolvePromise, ${DESKTOP_COMPOSER_SYNC_POLL_MS}));
+      return 'prepared';
+    }
+    return 'native-action-missing';
+  })()`;
+}
+
+/** Commit only after the official component exposes the exact staged text. */
+export function buildDesktopSendTextExpression(
+  chatId: string,
+  text: string,
+): string {
+  const expectedChatId = JSON.stringify(chatId.toLowerCase());
+  const expectedText = JSON.stringify(text);
+  return `(() => {
+    const expectedChatId = ${expectedChatId};
+    const expectedText = ${expectedText};
+    const editor = document.querySelector('.slate-message-input[contenteditable="true"]');
+    if (!editor) return 'composer-missing';
+    const fiberKey = Object.getOwnPropertyNames(editor)
+      .find((key) => key.startsWith('__reactFiber$'));
+    let fiber = fiberKey ? editor[fiberKey] : null;
+    for (let index = 0; fiber && index < 40; index += 1, fiber = fiber.return) {
+      const componentName = String(
+        fiber.elementType?.displayName ||
+        fiber.elementType?.name ||
+        fiber.type?.displayName ||
+        fiber.type?.name ||
+        '',
+      );
+      const instance = fiber.stateNode;
+      if (componentName !== 'ChatInputText' || !instance) continue;
+      if (String(instance.props?.chat?.groupChatId || '').toLowerCase() !== expectedChatId) {
+        return 'chat-mismatch';
       }
-      return 'text-mismatch';
+      if (
+        typeof instance.getMessage !== 'function' ||
+        typeof instance.handleSendMessage !== 'function'
+      ) {
+        return 'native-action-missing';
+      }
+      const message = instance.getMessage();
+      const actualText = String(message?.text || '')
+        .replace(/\\r\\n/g, '\\n')
+        .replace(/\\n$/, '');
+      if (actualText !== expectedText.replace(/\\r\\n/g, '\\n')) {
+        return 'text-mismatch';
+      }
+      instance.handleSendMessage();
+      return 'sent';
     }
     return 'native-action-missing';
   })()`;
@@ -1393,9 +1442,26 @@ export class ExpressDesktopClient {
       throw new Error("desktop message composer is unavailable");
     try {
       await hooks?.beforeDispatch?.(before);
-      const dispatched = await this.evaluate<DesktopSendTextResult>(
-        buildDesktopSendTextExpression(target.chatId, safeText),
+      const prepared = await this.evaluate<DesktopPrepareTextResult>(
+        buildDesktopPrepareTextExpression(target.chatId, safeText),
       );
+      if (prepared !== "prepared") {
+        throw new Error(`desktop native text send failed closed: ${prepared}`);
+      }
+      let dispatched: DesktopSendTextResult = "text-mismatch";
+      for (
+        let attempt = 0;
+        attempt < DESKTOP_COMPOSER_SYNC_ATTEMPTS;
+        attempt += 1
+      ) {
+        await new Promise((resolvePromise) =>
+          setTimeout(resolvePromise, DESKTOP_COMPOSER_SYNC_POLL_MS),
+        );
+        dispatched = await this.evaluate<DesktopSendTextResult>(
+          buildDesktopSendTextExpression(target.chatId, safeText),
+        );
+        if (dispatched !== "text-mismatch") break;
+      }
       if (dispatched !== "sent") {
         throw new Error(
           `desktop native text send failed closed: ${dispatched}`,

@@ -17,6 +17,7 @@ import {
   buildDesktopAttachmentStartExpression,
   buildDesktopAttachmentStatusExpression,
   buildDesktopPageStateExpression,
+  buildDesktopPrepareTextExpression,
   buildDesktopSendFileExpression,
   buildDesktopSendTextExpression,
   buildDesktopSnapshotExpression,
@@ -383,7 +384,7 @@ describe("eXpress desktop CDP bridge", () => {
     expect(paths).toEqual([`/chats/${chatId}`]);
   });
 
-  it("sends text only through the exact ChatInputText native contract", async () => {
+  it("sends text only through the exact ChatInputText native contract", () => {
     const chatId = "00000000-0000-4000-8000-000000000004";
     const sent: string[] = [];
     let draft = { text: "", mentions: [] as unknown[] };
@@ -408,23 +409,28 @@ describe("eXpress desktop CDP bridge", () => {
         return: null,
       },
     });
-    const run = (targetChatId: string, text: string) =>
+    const prepare = (targetChatId: string, text: string) =>
       Function(
         "document",
-        "setTimeout",
+        `return (${buildDesktopPrepareTextExpression(targetChatId, text)});`,
+      )({ querySelector: () => editor }) as string;
+    const commit = (targetChatId: string, text: string) =>
+      Function(
+        "document",
         `return (${buildDesktopSendTextExpression(targetChatId, text)});`,
-      )({ querySelector: () => editor }, (callback: () => void) => {
-        callback();
-        return 0;
-      }) as Promise<string>;
+      )({ querySelector: () => editor }) as string;
 
-    await expect(run(chatId, "line one\nline two")).resolves.toBe("sent");
+    expect(prepare(chatId, "line one\nline two")).toBe("prepared");
+    expect(commit(chatId, "line one\nline two")).toBe("text-mismatch");
+    expect(commit(chatId, "line one\nline two")).toBe("text-mismatch");
+    expect(commit(chatId, "line one\nline two")).toBe("text-mismatch");
+    expect(commit(chatId, "line one\nline two")).toBe("sent");
     expect(sent).toEqual(["line one\nline two"]);
     expect(getMessageCalls).toBe(4);
     expect(editor.focus).toHaveBeenCalledOnce();
-    await expect(
-      run("00000000-0000-4000-8000-000000000005", "blocked"),
-    ).resolves.toBe("chat-mismatch");
+    expect(prepare("00000000-0000-4000-8000-000000000005", "blocked")).toBe(
+      "chat-mismatch",
+    );
     expect(sent).toEqual(["line one\nline two"]);
     const available = (targetChatId: string) =>
       Function(
@@ -435,6 +441,9 @@ describe("eXpress desktop CDP bridge", () => {
     expect(available("00000000-0000-4000-8000-000000000005")).toBe(false);
     expect(buildDesktopSendTextExpression(chatId, "safe")).not.toContain(
       "Input.insertText",
+    );
+    expect(buildDesktopSendTextExpression(chatId, "safe")).not.toContain(
+      "new Promise",
     );
   });
 
@@ -1506,6 +1515,7 @@ describe("eXpress desktop CDP bridge", () => {
           senderId: "",
           type: "text" as const,
           text: "line one\nline two",
+          deliveryStatus: "sent",
         },
       ],
     };
@@ -1522,6 +1532,19 @@ describe("eXpress desktop CDP bridge", () => {
     ).toBeNull();
     expect(
       confirmedDesktopOutboundTextMessageId(before, after, "different"),
+    ).toBeNull();
+    expect(
+      confirmedDesktopOutboundTextMessageId(
+        before,
+        {
+          ownMessages: after.ownMessages.map((message) =>
+            message.id === deliveredId
+              ? { ...message, deliveryStatus: "sending" }
+              : message,
+          ),
+        },
+        "line one\nline two",
+      ),
     ).toBeNull();
   });
 
