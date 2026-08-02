@@ -17,7 +17,7 @@ Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=%t/bus
 Environment=GNOME_KEYRING_CONTROL=%t/openclaw-express-keyring
 Environment=APPDIR=%h/.local/share/openclaw-express-bridge/client/appdir
 Environment=APPIMAGE=%h/.local/share/openclaw-express-bridge/client/eXpress.AppImage
-ExecStart=%h/.local/share/openclaw-express-bridge/client/appdir/AppRun --no-sandbox --disable-gpu --disable-dev-shm-usage --password-store=basic --remote-debugging-address=127.0.0.1 --remote-debugging-port=18997
+ExecStart=%h/.local/share/openclaw-express-bridge/client/appdir/AppRun --no-sandbox --disable-gpu --password-store=basic --remote-debugging-address=127.0.0.1 --remote-debugging-port=18997
 Restart=always
 RestartSec=5s
 TimeoutStopSec=20s

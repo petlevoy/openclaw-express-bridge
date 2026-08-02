@@ -76,6 +76,7 @@ echo "[5/7] fail-closed and loopback-only assertions"
 grep -q 'desktopOutboundEnabled.*False' "$ROOT/bin/openclaw-express-bridge"
 grep -q 'rm -f.*SWITCH_PATH' "$ROOT/bin/openclaw-express-bridge"
 grep -q -- '--remote-debugging-address=127.0.0.1' "$ROOT/systemd/openclaw-express-client.service"
+! grep -q -- '--disable-dev-shm-usage' "$ROOT/systemd/openclaw-express-client.service"
 ! grep -REq '(0\.0\.0\.0|desktopOutboundEnabled.*True)' "$ROOT/systemd" "$ROOT/client.env"
 
 echo "[6/7] secret scan"

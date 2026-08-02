@@ -1,5 +1,10 @@
 # Release notes
 
+## Unreleased
+
+- Keeps Chromium shared-memory buffers in `/dev/shm` instead of redirecting
+  them to disk-backed `/tmp`, preventing sustained renderer writes to disk.
+
 ## 1.1.16
 
 - Ships eXpress plugin 2.3.8. Ordinary inbound events are marked complete only
