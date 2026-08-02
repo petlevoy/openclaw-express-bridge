@@ -4,7 +4,8 @@ set -euo pipefail
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 echo "[1/7] shell syntax"
 bash -n "$ROOT/bin/openclaw-express-bridge" "$ROOT/install.sh" "$ROOT/uninstall.sh" \
-  "$ROOT/lib/common.sh" "$ROOT/lib/express-keyring-service.sh" "$ROOT/build.sh" \
+  "$ROOT/lib/common.sh" "$ROOT/lib/express-keyring-service.sh" \
+  "$ROOT/lib/express-xvfb-service.sh" "$ROOT/build.sh" \
   "$ROOT/tests/scan-secrets.sh"
 
 echo "[2/7] node helper syntax"
@@ -41,6 +42,7 @@ const root = process.argv[3];
 if (output.agent.id !== "fixture-agent") process.exit(1);
 if (output.agent.workspace !== path.join(root, "fixture-agent", "workspace")) process.exit(1);
 if (output.agent.sandbox?.docker?.network !== "none") process.exit(1);
+if (output.agent.sandbox?.docker?.user !== `${process.getuid()}:${process.getgid()}`) process.exit(1);
 if (!output.agent.tools?.deny?.includes("message")) process.exit(1);
 if (!fs.statSync(output.agent.workspace).isDirectory()) process.exit(1);
 if ((fs.statSync(output.agent.workspace).mode & 0o777) !== 0o700) process.exit(1);
@@ -60,7 +62,7 @@ fi
 echo "OK: unit files parsed (missing runtime paths are expected before install)"
 
 echo "[4/7] CLI smoke and dry-run installer"
-test "$(OPENCLAW_EXPRESS_BRIDGE_ROOT="$ROOT" "$ROOT/bin/openclaw-express-bridge" version)" = "1.1.16"
+test "$(OPENCLAW_EXPRESS_BRIDGE_ROOT="$ROOT" "$ROOT/bin/openclaw-express-bridge" version)" = "1.1.17"
 OPENCLAW_EXPRESS_BRIDGE_ROOT="$ROOT" "$ROOT/bin/openclaw-express-bridge" --help >/dev/null
 smoke_home=$(mktemp -d)
 trap 'rm -rf "$smoke_home" "$agent_root"; rm -f "$generator_input" "$generator_output" "$agent_input" "$agent_output"' EXIT
@@ -77,6 +79,8 @@ grep -q 'desktopOutboundEnabled.*False' "$ROOT/bin/openclaw-express-bridge"
 grep -q 'rm -f.*SWITCH_PATH' "$ROOT/bin/openclaw-express-bridge"
 grep -q -- '--remote-debugging-address=127.0.0.1' "$ROOT/systemd/openclaw-express-client.service"
 ! grep -q -- '--disable-dev-shm-usage' "$ROOT/systemd/openclaw-express-client.service"
+grep -q 'refusing legacy configure for a multi-chat deployment' "$ROOT/bin/openclaw-express-bridge"
+grep -q 'cp -a squashfs-root/\. \.' "$ROOT/bin/openclaw-express-bridge"
 ! grep -REq '(0\.0\.0\.0|desktopOutboundEnabled.*True)' "$ROOT/systemd" "$ROOT/client.env"
 
 echo "[6/7] secret scan"
@@ -85,7 +89,8 @@ echo "[6/7] secret scan"
 echo "[7/7] optional ShellCheck"
 if command -v shellcheck >/dev/null 2>&1; then
   shellcheck -x "$ROOT/bin/openclaw-express-bridge" "$ROOT/install.sh" "$ROOT/uninstall.sh" \
-    "$ROOT/lib/common.sh" "$ROOT/lib/express-keyring-service.sh" "$ROOT/build.sh" \
+    "$ROOT/lib/common.sh" "$ROOT/lib/express-keyring-service.sh" \
+    "$ROOT/lib/express-xvfb-service.sh" "$ROOT/build.sh" \
     "$ROOT/tests/scan-secrets.sh"
 else
   echo "SKIP: shellcheck not installed"

@@ -1,9 +1,21 @@
 # Release notes
 
-## Unreleased
+## 1.1.17
 
 - Keeps Chromium shared-memory buffers in `/dev/shm` instead of redirecting
   them to disk-backed `/tmp`, preventing sustained renderer writes to disk.
+- Ships eXpress plugin 2.3.9. The durable delivery journal migrates from
+  plaintext reply bodies to normalized SHA-256 evidence while retaining exact
+  crash-recovery reconciliation.
+- Reports only unresolved stale delivery attempts; retained, confirmed
+  evidence no longer produces a permanent watchdog warning.
+- Recovers one stuck official-client composer by reloading, reconciling and
+  restaging only when the first attempt was proven not to have committed.
+- Refuses the legacy single-chat configure command on an existing multi-chat
+  deployment and includes exact eXpress bindings, routed agent configuration
+  and DM scope in protected bridge backups.
+- Adds authenticated Xvfb access and tighter systemd filesystem, capability,
+  process and memory boundaries for the official desktop client.
 
 ## 1.1.16
 

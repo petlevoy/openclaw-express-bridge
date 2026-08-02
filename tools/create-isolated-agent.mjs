@@ -103,6 +103,7 @@ const browserImage = safeImage(
   "openclaw-sandbox-browser:bookworm-slim",
   "browserImage",
 );
+const sandboxUser = `${process.getuid?.() ?? 1000}:${process.getgid?.() ?? 1000}`;
 
 const agentsRoot = resolve(process.argv[3]);
 if (agentsRoot === "/" || basename(agentsRoot) === "") {
@@ -239,7 +240,9 @@ const output = {
         readOnlyRoot: true,
         tmpfs: ["/tmp", "/var/tmp", "/run"],
         network: "none",
-        user: "10001:10001",
+        // Match the operator that owns the mode-0700 bind-mounted workspace.
+        // A fixed image UID cannot read that workspace on a normal host.
+        user: sandboxUser,
         capDrop: ["ALL"],
         env: { LANG: "C.UTF-8", LC_ALL: "C.UTF-8" },
         pidsLimit: 128,

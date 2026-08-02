@@ -1,10 +1,10 @@
 Package: openclaw-express-bridge
-Version: 1.1.13
+Version: 1.1.17
 Section: net
 Priority: optional
 Architecture: amd64
 Maintainer: OpenClaw eXpress Bridge Maintainers <noreply@users.noreply.github.com>
-Depends: bash, coreutils, curl, dbus-user-session, gnome-keyring, nodejs (>= 22.22.3), python3, tar, xvfb
+Depends: bash, coreutils, curl, dbus-user-session, gnome-keyring, nodejs (>= 22.22.3), python3, tar, util-linux, xauth, xvfb
 Description: Headless official eXpress desktop bridge for OpenClaw
  Fail-closed OpenClaw channel bridge using an isolated official eXpress Linux
  desktop client, Xvfb, a dedicated keyring/profile and loopback-only CDP.

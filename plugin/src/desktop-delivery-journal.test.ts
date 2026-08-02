@@ -2,11 +2,13 @@ import { describe, expect, it } from "vitest";
 
 import {
   type DesktopDeliveryJournal,
+  desktopDeliveryTextSha256,
+  parseDesktopDeliveryJournal,
   reconcileDesktopDeliveryEntry,
 } from "./desktop-delivery-journal.js";
 
 function journal(): DesktopDeliveryJournal {
-  return { version: 1, initializedAt: 100, entries: {} };
+  return { version: 2, initializedAt: 100, entries: {} };
 }
 
 describe("reconcileDesktopDeliveryEntry", () => {
@@ -43,7 +45,7 @@ describe("reconcileDesktopDeliveryEntry", () => {
       attempts: [
         {
           id: "attempt",
-          text: "answer",
+          textSha256: desktopDeliveryTextSha256("answer"),
           baselineOwnMessageIds: ["before"],
           dispatchedAt: 102,
         },
@@ -75,7 +77,7 @@ describe("reconcileDesktopDeliveryEntry", () => {
       attempts: [
         {
           id: "attempt",
-          text: "answer",
+          textSha256: desktopDeliveryTextSha256("answer"),
           baselineOwnMessageIds: ["before"],
           dispatchedAt: 102,
         },
@@ -106,7 +108,7 @@ describe("reconcileDesktopDeliveryEntry", () => {
       attempts: [
         {
           id: "attempt",
-          text: "first",
+          textSha256: desktopDeliveryTextSha256("first"),
           baselineOwnMessageIds: [],
           dispatchedAt: 102,
           messageId: "sent-first",
@@ -122,5 +124,34 @@ describe("reconcileDesktopDeliveryEntry", () => {
         expectedTexts: ["first", "second"],
       }),
     ).toMatchObject({ status: "unresolved" });
+  });
+
+  it("migrates a v1 journal without retaining plaintext", () => {
+    const migrated = parseDesktopDeliveryJournal(
+      JSON.stringify({
+        version: 1,
+        initializedAt: 100,
+        entries: {
+          queue: {
+            queueId: "queue",
+            chatId: "chat",
+            updatedAt: 102,
+            attempts: [
+              {
+                id: "attempt",
+                text: "private answer",
+                baselineOwnMessageIds: [],
+                dispatchedAt: 102,
+              },
+            ],
+          },
+        },
+      }),
+    );
+    expect(migrated.version).toBe(2);
+    expect(migrated.entries.queue?.attempts[0]).toMatchObject({
+      textSha256: desktopDeliveryTextSha256("private answer"),
+    });
+    expect(JSON.stringify(migrated)).not.toContain("private answer");
   });
 });

@@ -144,6 +144,7 @@ export const DESKTOP_TYPING_FAILSAFE_MS = 8_000;
 export const DEFAULT_DESKTOP_TEXT_CHUNK_LIMIT = 1_800;
 export const DESKTOP_COMPOSER_SYNC_ATTEMPTS = 20;
 export const DESKTOP_COMPOSER_SYNC_POLL_MS = 100;
+export const DESKTOP_COMPOSER_STAGE_ATTEMPTS = 2;
 export const DESKTOP_RENDERER_AUTH_WAIT_ATTEMPTS = 60;
 
 export interface DesktopPageState {
@@ -1548,6 +1549,21 @@ export class ExpressDesktopClient {
     return this.withUiLock(() => this.ensureTargetActive(targetChatId));
   }
 
+  /**
+   * Periodically reload the long-lived Electron renderer under the shared UI
+   * lock. The official client can remain CDP-responsive while its live chat
+   * data stops advancing, which otherwise leaves inbound messages invisible
+   * to the monitor without producing a transport error.
+   */
+  async refreshAllowed(targetChatId: string): Promise<DesktopSnapshot> {
+    return this.withUiLock(async () => {
+      const target = this.resolveTarget(targetChatId);
+      await this.ensureTargetActive(target.chatId);
+      await this.reloadRendererUnlocked();
+      return this.ensureTargetActive(target.chatId, false);
+    });
+  }
+
   async textActionAvailable(targetChatId: string): Promise<boolean> {
     return this.withUiLock(async () => {
       const target = this.resolveTarget(targetChatId);
@@ -1599,25 +1615,31 @@ export class ExpressDesktopClient {
       throw new Error("desktop message composer is unavailable");
     try {
       await hooks?.beforeDispatch?.(before);
-      const prepared = await this.evaluate<DesktopPrepareTextResult>(
-        buildDesktopPrepareTextExpression(target.chatId, safeText),
+      let dispatched = await this.stageAndDispatchTextUnlocked(
+        target.chatId,
+        safeText,
       );
-      if (prepared !== "prepared") {
-        throw new Error(`desktop native text send failed closed: ${prepared}`);
-      }
-      let dispatched: DesktopSendTextResult = "text-mismatch";
-      for (
-        let attempt = 0;
-        attempt < DESKTOP_COMPOSER_SYNC_ATTEMPTS;
-        attempt += 1
-      ) {
-        await new Promise((resolvePromise) =>
-          setTimeout(resolvePromise, DESKTOP_COMPOSER_SYNC_POLL_MS),
+      if (dispatched === "text-mismatch") {
+        // A long-lived official client can leave ChatInputText mounted while
+        // its backing Slate/React state stops accepting setInputText(). Since
+        // handleSendMessage() is never invoked on a text mismatch, it is safe
+        // to reload the renderer, reconcile against the pre-send baseline and
+        // restage once the exact allowlisted chat is active again.
+        await this.reloadRendererUnlocked();
+        const afterRecovery = await this.ensureTargetActive(
+          target.chatId,
+          false,
         );
-        dispatched = await this.evaluate<DesktopSendTextResult>(
-          buildDesktopSendTextExpression(target.chatId, safeText),
+        const recoveredMessageId = confirmedDesktopOutboundTextMessageId(
+          before,
+          afterRecovery,
+          safeText,
         );
-        if (dispatched !== "text-mismatch") break;
+        if (recoveredMessageId) return recoveredMessageId;
+        dispatched = await this.stageAndDispatchTextUnlocked(
+          target.chatId,
+          safeText,
+        );
       }
       if (dispatched !== "sent") {
         throw new Error(
@@ -1653,6 +1675,37 @@ export class ExpressDesktopClient {
         "desktop outbound delivery state is unknown after renderer recovery; message was not retried",
       );
     }
+  }
+
+  private async stageAndDispatchTextUnlocked(
+    targetChatId: string,
+    text: string,
+  ): Promise<DesktopSendTextResult> {
+    let dispatched: DesktopSendTextResult = "text-mismatch";
+    for (
+      let stageAttempt = 0;
+      stageAttempt < DESKTOP_COMPOSER_STAGE_ATTEMPTS;
+      stageAttempt += 1
+    ) {
+      const prepared = await this.evaluate<DesktopPrepareTextResult>(
+        buildDesktopPrepareTextExpression(targetChatId, text),
+      );
+      if (prepared !== "prepared") return prepared;
+      for (
+        let syncAttempt = 0;
+        syncAttempt < DESKTOP_COMPOSER_SYNC_ATTEMPTS;
+        syncAttempt += 1
+      ) {
+        await new Promise((resolvePromise) =>
+          setTimeout(resolvePromise, DESKTOP_COMPOSER_SYNC_POLL_MS),
+        );
+        dispatched = await this.evaluate<DesktopSendTextResult>(
+          buildDesktopSendTextExpression(targetChatId, text),
+        );
+        if (dispatched !== "text-mismatch") return dispatched;
+      }
+    }
+    return dispatched;
   }
 
   async setTyping(targetChatId: string, active: boolean): Promise<void> {

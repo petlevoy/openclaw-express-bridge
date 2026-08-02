@@ -262,6 +262,176 @@ describe("eXpress desktop CDP bridge", () => {
     expect(rpcRequest).not.toHaveBeenCalled();
   });
 
+  it("self-heals a stuck native text composer before sending", async () => {
+    vi.useFakeTimers();
+    try {
+      const chatId = "00000000-0000-4000-8000-000000000008";
+      const deliveredId = "00000000-0000-4000-8000-000000000009";
+      const text = "self-healing reply";
+      const client = new ExpressDesktopClient({
+        cdpUrl: "http://127.0.0.1:18997",
+        chats: [{ chatId, chatTitle: "Approved" }],
+      });
+      const snapshot = {
+        authenticated: true,
+        chatId,
+        chatTitle: "Approved",
+        composerReady: true,
+        messages: [],
+        ownMessages: [],
+        lastOwnMessageId: null,
+      };
+      const deliveredSnapshot = {
+        ...snapshot,
+        ownMessages: [
+          {
+            id: deliveredId,
+            senderId: "",
+            type: "text" as const,
+            text,
+            deliveryStatus: "sent",
+          },
+        ],
+        lastOwnMessageId: deliveredId,
+      };
+      const rpcRequest = vi.fn().mockResolvedValue({});
+      const beforeDispatch = vi.fn().mockResolvedValue(undefined);
+      const internals = client as unknown as {
+        rpc: { request: typeof rpcRequest; close: () => void };
+        evaluate: <T>(expression: string) => Promise<T>;
+        sendTextUnlocked: (
+          targetChatId: string,
+          value: string,
+          hooks: { beforeDispatch: typeof beforeDispatch },
+        ) => Promise<string>;
+      };
+      internals.rpc = { request: rpcRequest, close: () => undefined };
+      let snapshotCalls = 0;
+      let prepareCalls = 0;
+      let commitCalls = 0;
+      internals.evaluate = async <T>(expression: string): Promise<T> => {
+        if (expression.includes("chat-message-row--opponent")) {
+          snapshotCalls += 1;
+          return (snapshotCalls >= 3 ? deliveredSnapshot : snapshot) as T;
+        }
+        if (expression.includes("rendererError")) {
+          return {
+            authenticated: true,
+            chatListReady: true,
+            rendererError: false,
+          } as T;
+        }
+        if (expression.includes("instance.setInputText")) {
+          prepareCalls += 1;
+          return "prepared" as T;
+        }
+        if (expression.includes("instance.handleSendMessage")) {
+          commitCalls += 1;
+          return (commitCalls <= 40 ? "text-mismatch" : "sent") as T;
+        }
+        throw new Error("unexpected expression");
+      };
+
+      const result = internals.sendTextUnlocked(chatId, text, {
+        beforeDispatch,
+      });
+      await vi.runAllTimersAsync();
+
+      await expect(result).resolves.toBe(deliveredId);
+      expect(prepareCalls).toBe(3);
+      expect(commitCalls).toBe(41);
+      expect(beforeDispatch).toHaveBeenCalledOnce();
+      expect(rpcRequest).toHaveBeenCalledOnce();
+      expect(rpcRequest).toHaveBeenCalledWith(
+        "Page.reload",
+        { ignoreCache: false },
+        10_000,
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("reconciles after composer recovery before restaging", async () => {
+    vi.useFakeTimers();
+    try {
+      const chatId = "00000000-0000-4000-8000-000000000010";
+      const deliveredId = "00000000-0000-4000-8000-000000000011";
+      const text = "already delivered reply";
+      const client = new ExpressDesktopClient({
+        cdpUrl: "http://127.0.0.1:18997",
+        chats: [{ chatId, chatTitle: "Approved" }],
+      });
+      const snapshot = {
+        authenticated: true,
+        chatId,
+        chatTitle: "Approved",
+        composerReady: true,
+        messages: [],
+        ownMessages: [],
+        lastOwnMessageId: null,
+      };
+      const deliveredSnapshot = {
+        ...snapshot,
+        ownMessages: [
+          {
+            id: deliveredId,
+            senderId: "",
+            type: "text" as const,
+            text,
+            deliveryStatus: "read",
+          },
+        ],
+        lastOwnMessageId: deliveredId,
+      };
+      const rpcRequest = vi.fn().mockResolvedValue({});
+      const internals = client as unknown as {
+        rpc: { request: typeof rpcRequest; close: () => void };
+        evaluate: <T>(expression: string) => Promise<T>;
+        sendTextUnlocked: (
+          targetChatId: string,
+          value: string,
+        ) => Promise<string>;
+      };
+      internals.rpc = { request: rpcRequest, close: () => undefined };
+      let snapshotCalls = 0;
+      let prepareCalls = 0;
+      let commitCalls = 0;
+      internals.evaluate = async <T>(expression: string): Promise<T> => {
+        if (expression.includes("chat-message-row--opponent")) {
+          snapshotCalls += 1;
+          return (snapshotCalls >= 2 ? deliveredSnapshot : snapshot) as T;
+        }
+        if (expression.includes("rendererError")) {
+          return {
+            authenticated: true,
+            chatListReady: true,
+            rendererError: false,
+          } as T;
+        }
+        if (expression.includes("instance.setInputText")) {
+          prepareCalls += 1;
+          return "prepared" as T;
+        }
+        if (expression.includes("instance.handleSendMessage")) {
+          commitCalls += 1;
+          return "text-mismatch" as T;
+        }
+        throw new Error("unexpected expression");
+      };
+
+      const result = internals.sendTextUnlocked(chatId, text);
+      await vi.runAllTimersAsync();
+
+      await expect(result).resolves.toBe(deliveredId);
+      expect(prepareCalls).toBe(2);
+      expect(commitCalls).toBe(40);
+      expect(rpcRequest).toHaveBeenCalledOnce();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("accepts only loopback CDP endpoints", () => {
     expect(normalizeLoopbackCdpUrl("http://127.0.0.1:18997/")).toBe(
       "http://127.0.0.1:18997",

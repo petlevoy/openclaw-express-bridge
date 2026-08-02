@@ -4,11 +4,22 @@ Before=openclaw-express-client.service
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/Xvfb :97 -screen 0 1600x1000x24 -nolisten tcp -ac
+ExecStart=%h/.local/share/openclaw-express-bridge/runtime/lib/express-xvfb-service.sh
 Restart=always
 RestartSec=3s
+UMask=0077
 NoNewPrivileges=true
 PrivateTmp=true
+ProtectHome=read-only
+ProtectSystem=strict
+RestrictAddressFamilies=AF_UNIX
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryMax=128M
+TasksMax=32
+SystemCallArchitectures=native
 
 [Install]
 WantedBy=default.target

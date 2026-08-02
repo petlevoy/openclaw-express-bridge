@@ -24,7 +24,10 @@ import {
   isDesktopOutboundUnlocked,
   validateDesktopOutboundFile,
 } from "./desktop-cdp.js";
-import { loadDesktopDeliveryJournal } from "./desktop-delivery-journal.js";
+import {
+  desktopDeliveryEntryNeedsReconciliation,
+  loadDesktopDeliveryJournal,
+} from "./desktop-delivery-journal.js";
 import { desktopReplySender, desktopRoutePeer } from "./desktop-routing.js";
 import {
   DesktopDispatchRateLimiter,
@@ -410,7 +413,10 @@ export async function startExpressDesktopMonitor(
     ]);
     const issues = deliveryWatchdog.audit({
       dedupe,
-      journalEntries: Object.values(journal?.entries ?? {}),
+      journalEntries: Object.values(journal?.entries ?? {}).map((entry) => ({
+        updatedAt: entry.updatedAt,
+        unresolved: desktopDeliveryEntryNeedsReconciliation(entry),
+      })),
     });
     const fingerprint = issues.join("; ");
     watchdogLastError = issues.length
@@ -481,6 +487,8 @@ export async function startExpressDesktopMonitor(
   });
   const roundRobin = new DesktopRoundRobin(chatRuntimes);
   let reconnectDelayMs = 1000;
+  const rendererRefreshIntervalMs = 5 * 60_000;
+  let nextRendererRefreshAt = Date.now() + rendererRefreshIntervalMs;
 
   statusSink?.({
     running: true,
@@ -495,7 +503,16 @@ export async function startExpressDesktopMonitor(
     while (!abortSignal.aborted) {
       const runtime = roundRobin.next();
       try {
-        const snapshot = await client.snapshotAllowed(runtime.chat.chatId);
+        const refreshRenderer = Date.now() >= nextRendererRefreshAt;
+        const snapshot = refreshRenderer
+          ? await client.refreshAllowed(runtime.chat.chatId)
+          : await client.snapshotAllowed(runtime.chat.chatId);
+        if (refreshRenderer) {
+          nextRendererRefreshAt = Date.now() + rendererRefreshIntervalMs;
+          log?.info?.(
+            `[${account.accountId}] eXpress desktop renderer refreshed after liveness interval`,
+          );
+        }
         client.assertSnapshotAllowed(snapshot, runtime.chat.chatId);
         reconnectDelayMs = 1000;
         statusSink?.({ lastError: watchdogLastError });

@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { chmod, mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -6,13 +6,13 @@ import { dirname, join, resolve } from "node:path";
 import type { ResolvedExpressAccount } from "./accounts.js";
 import type { DesktopSnapshot } from "./desktop-cdp.js";
 
-const JOURNAL_VERSION = 1;
+const JOURNAL_VERSION = 2;
 const JOURNAL_MAX_ENTRIES = 256;
 const JOURNAL_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 
 export interface DesktopDeliveryAttempt {
   id: string;
-  text: string;
+  textSha256: string;
   baselineOwnMessageIds: string[];
   dispatchedAt: number;
   messageId?: string;
@@ -26,9 +26,28 @@ export interface DesktopDeliveryEntry {
 }
 
 export interface DesktopDeliveryJournal {
-  version: 1;
+  version: 2;
   initializedAt: number;
   entries: Record<string, DesktopDeliveryEntry>;
+}
+
+interface LegacyDesktopDeliveryAttempt {
+  id: string;
+  text: string;
+  baselineOwnMessageIds: string[];
+  dispatchedAt: number;
+  messageId?: string;
+}
+
+interface LegacyDesktopDeliveryJournal {
+  version: 1;
+  initializedAt: number;
+  entries: Record<
+    string,
+    Omit<DesktopDeliveryEntry, "attempts"> & {
+      attempts: LegacyDesktopDeliveryAttempt[];
+    }
+  >;
 }
 
 export type DesktopDeliveryReconciliation =
@@ -99,25 +118,89 @@ function emptyJournal(now = Date.now()): DesktopDeliveryJournal {
   };
 }
 
-function parseJournal(value: string): DesktopDeliveryJournal {
-  const parsed = JSON.parse(value) as Partial<DesktopDeliveryJournal>;
+function normalizeText(value: string): string {
+  return value.replace(/\r\n/g, "\n").trim();
+}
+
+export function desktopDeliveryTextSha256(value: string): string {
+  return createHash("sha256")
+    .update(normalizeText(value), "utf8")
+    .digest("hex");
+}
+
+function hasJournalEnvelope(value: unknown): value is {
+  version: unknown;
+  initializedAt: number;
+  entries: Record<string, unknown>;
+} {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const parsed = value as Record<string, unknown>;
+  return (
+    typeof parsed.initializedAt === "number" &&
+    Boolean(parsed.entries) &&
+    typeof parsed.entries === "object" &&
+    !Array.isArray(parsed.entries)
+  );
+}
+
+export function parseDesktopDeliveryJournal(
+  value: string,
+): DesktopDeliveryJournal {
+  const parsed = JSON.parse(value) as unknown;
+  if (!hasJournalEnvelope(parsed)) {
+    throw new Error("desktop eXpress delivery journal is invalid");
+  }
+  if (parsed.version === 1) {
+    const legacy = parsed as LegacyDesktopDeliveryJournal;
+    return {
+      version: JOURNAL_VERSION,
+      initializedAt: legacy.initializedAt,
+      entries: Object.fromEntries(
+        Object.entries(legacy.entries).map(([queueId, entry]) => [
+          queueId,
+          {
+            ...entry,
+            attempts: entry.attempts.map((attempt) => {
+              const { text, ...retained } = attempt;
+              return {
+                ...retained,
+                textSha256: desktopDeliveryTextSha256(text),
+              };
+            }),
+          },
+        ]),
+      ),
+    };
+  }
   if (
     parsed.version !== JOURNAL_VERSION ||
-    typeof parsed.initializedAt !== "number" ||
-    !parsed.entries ||
-    typeof parsed.entries !== "object" ||
-    Array.isArray(parsed.entries)
+    !Object.values(parsed.entries).every((entry) => {
+      if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+        return false;
+      }
+      const attempts = (entry as { attempts?: unknown }).attempts;
+      return (
+        Array.isArray(attempts) &&
+        attempts.every(
+          (attempt) =>
+            Boolean(attempt) &&
+            typeof attempt === "object" &&
+            typeof (attempt as { textSha256?: unknown }).textSha256 ===
+              "string",
+        )
+      );
+    })
   ) {
     throw new Error("desktop eXpress delivery journal is invalid");
   }
-  return parsed as DesktopDeliveryJournal;
+  return parsed as unknown as DesktopDeliveryJournal;
 }
 
 async function readJournal(
   path: string,
 ): Promise<DesktopDeliveryJournal | null> {
   try {
-    return parseJournal(await readFile(path, "utf8"));
+    return parseDesktopDeliveryJournal(await readFile(path, "utf8"));
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
     throw error;
@@ -193,7 +276,7 @@ export async function recordDesktopDeliveryDispatch(
     }
     entry.attempts.push({
       id: params.attemptId,
-      text: params.text,
+      textSha256: desktopDeliveryTextSha256(params.text),
       baselineOwnMessageIds: [...params.baselineOwnMessageIds],
       dispatchedAt: now,
     });
@@ -234,8 +317,10 @@ export async function resetDesktopDeliveryEntry(
   });
 }
 
-function normalizeText(value: string): string {
-  return value.replace(/\r\n/g, "\n").trim();
+export function desktopDeliveryEntryNeedsReconciliation(
+  entry: DesktopDeliveryEntry,
+): boolean {
+  return entry.attempts.some((attempt) => !attempt.messageId);
 }
 
 export function reconcileDesktopDeliveryEntry(params: {
@@ -266,7 +351,10 @@ export function reconcileDesktopDeliveryEntry(params: {
   const messageIds: string[] = [];
   for (const [index, expectedText] of expectedTexts.entries()) {
     const attempt = entry.attempts[index];
-    if (!attempt || normalizeText(attempt.text) !== expectedText) {
+    if (
+      !attempt ||
+      attempt.textSha256 !== desktopDeliveryTextSha256(expectedText)
+    ) {
       return messageIds.length === 0
         ? { status: "not_sent" }
         : {

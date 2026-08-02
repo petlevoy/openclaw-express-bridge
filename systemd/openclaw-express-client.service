@@ -8,6 +8,7 @@ Wants=network-online.target
 Type=simple
 WorkingDirectory=%h/.local/share/openclaw-express-bridge/client/appdir
 Environment=DISPLAY=:97
+Environment=XAUTHORITY=%t/openclaw-express-xvfb/Xauthority
 Environment=HOME=%h/.local/share/openclaw-express-bridge/profile/home
 Environment=XDG_CONFIG_HOME=%h/.local/share/openclaw-express-bridge/profile/config
 Environment=XDG_DATA_HOME=%h/.local/share/openclaw-express-bridge/profile/data
@@ -23,7 +24,20 @@ RestartSec=5s
 TimeoutStopSec=20s
 KillMode=mixed
 NoNewPrivileges=true
+UMask=0077
+LockPersonality=true
+MemoryHigh=1400M
+MemoryMax=1800M
+TasksMax=128
 PrivateTmp=true
+ProtectHome=read-only
+ProtectSystem=strict
+ReadWritePaths=%h/.local/share/openclaw-express-bridge
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+SystemCallArchitectures=native
 
 [Install]
 WantedBy=default.target

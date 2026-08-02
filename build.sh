@@ -49,6 +49,7 @@ normalize_tree() {
   find "$tree" -type f \( \
     -path '*/bin/openclaw-express-bridge' -o \
     -path '*/lib/express-keyring-service.sh' -o \
+    -path '*/lib/express-xvfb-service.sh' -o \
     -path '*/helpers/cdp-screenshot.mjs' -o \
     -path '*/tools/generate-desktop-routing.mjs' -o \
     -path '*/tools/create-isolated-agent.mjs' -o \

@@ -68,6 +68,8 @@ copy_runtime() {
   cp -a "$ROOT/helpers/." "$RUNTIME_HOME/helpers/"
   cp -a "$ROOT/systemd/." "$RUNTIME_HOME/systemd/"
   cp -a "$ROOT/plugin/." "$RUNTIME_HOME/plugin/"
+  chmod 755 "$RUNTIME_HOME/lib/express-keyring-service.sh" \
+    "$RUNTIME_HOME/lib/express-xvfb-service.sh"
   install -m 644 "$ROOT/VERSION" "$ROOT/LICENSE" "$ROOT/client.env" "$RUNTIME_HOME/"
 }
 
@@ -203,8 +205,8 @@ cmd_install_client() {
   (
     cd "$CLIENT_HOME/appdir.new"
     "$CLIENT_HOME/eXpress.AppImage.new" --appimage-extract >/dev/null
-    mv squashfs-root/* .
-    rmdir squashfs-root
+    cp -a squashfs-root/. .
+    rm -rf squashfs-root
   )
   rm -rf "$CLIENT_HOME/appdir"
   mv "$CLIENT_HOME/appdir.new" "$CLIENT_HOME/appdir"
@@ -227,6 +229,16 @@ cmd_configure() {
     shift
   done
   bridge_require openclaw python3
+  local existing_chats existing_chat_count=0
+  existing_chats=$(bridge_config_get channels.express.desktopChats)
+  if [[ -n "$existing_chats" ]]; then
+    existing_chat_count=$(python3 -c \
+      'import json,sys; value=json.load(sys.stdin); print(len(value) if isinstance(value,list) else 0)' \
+      <<<"$existing_chats") || bridge_die "existing desktopChats config is invalid"
+  fi
+  if ((existing_chat_count > 1)); then
+    bridge_die "refusing legacy configure for a multi-chat deployment; generate and review the complete routing inventory instead"
+  fi
   if [[ "$non_interactive" == false ]]; then
     [[ -n "$chat_id" ]] || read -r -p "Exact eXpress chat UUID: " chat_id
     [[ -n "$chat_title" ]] || read -r -p "Exact eXpress chat title: " chat_title
@@ -357,6 +369,21 @@ cmd_backup() {
     [[ ! -e "$BRIDGE_HOME/$item" ]] || cp -a "$BRIDGE_HOME/$item" "$temp/payload/"
   done
   openclaw config get channels.express > "$temp/payload/channels.express.json"
+  openclaw config get bindings | python3 -c '
+import json,sys
+bindings=json.load(sys.stdin)
+json.dump([item for item in bindings if item.get("match",{}).get("channel")=="express"],sys.stdout,indent=2)
+sys.stdout.write("\n")
+' > "$temp/payload/express-bindings.json"
+  openclaw config get agents.list | python3 -c '
+import json,sys
+agents=json.load(sys.stdin)
+with open(sys.argv[1],encoding="utf-8") as handle:
+    agent_ids={item.get("agentId") for item in json.load(handle)}
+json.dump([item for item in agents if item.get("id") in agent_ids],sys.stdout,indent=2)
+sys.stdout.write("\n")
+' "$temp/payload/express-bindings.json" > "$temp/payload/express-agents.json"
+  openclaw config get session.dmScope > "$temp/payload/session.dmScope.json"
   printf '%s\n' "$VERSION" > "$temp/payload/bridge-version"
   chmod -R go-rwx "$temp/payload"
   tar -C "$temp" -czf "$output" payload

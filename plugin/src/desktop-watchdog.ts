@@ -4,6 +4,7 @@ export const DEFAULT_DESKTOP_WATCHDOG_WARN_MS = 120_000;
 
 export interface DesktopWatchdogJournalEntry {
   updatedAt: number;
+  unresolved: boolean;
 }
 
 export interface DesktopWatchdogAuditInput {
@@ -74,7 +75,7 @@ export class DesktopDeliveryWatchdog {
     }
 
     const staleDeliveries = input.journalEntries.filter(
-      (entry) => now - entry.updatedAt >= this.warnAfterMs,
+      (entry) => entry.unresolved && now - entry.updatedAt >= this.warnAfterMs,
     );
     if (staleDeliveries.length > 0) {
       issues.push(

@@ -43,7 +43,7 @@ describe("desktop delivery watchdog", () => {
           quarantined: 1,
         },
       ],
-      journalEntries: [{ updatedAt: 50 }],
+      journalEntries: [{ updatedAt: 50, unresolved: true }],
       now: 2_000,
     });
     expect(issues).toEqual([
@@ -53,5 +53,16 @@ describe("desktop delivery watchdog", () => {
       "1 inbound event(s) are quarantined",
       "1 durable outbound delivery entry/entries are stale",
     ]);
+  });
+
+  it("does not report retained confirmed delivery evidence as stale", () => {
+    const watchdog = new DesktopDeliveryWatchdog(1_000);
+    expect(
+      watchdog.audit({
+        dedupe: [healthyState],
+        journalEntries: [{ updatedAt: 50, unresolved: false }],
+        now: 2_000,
+      }),
+    ).toEqual([]);
   });
 });

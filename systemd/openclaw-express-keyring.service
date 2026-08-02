@@ -12,7 +12,19 @@ Restart=on-failure
 RestartSec=5s
 KillMode=control-group
 NoNewPrivileges=true
+UMask=0077
+LockPersonality=true
+MemoryMax=128M
+TasksMax=32
 PrivateTmp=true
+ProtectHome=read-only
+ProtectSystem=strict
+ReadWritePaths=%h/.local/share/openclaw-express-bridge/profile/data
+RestrictAddressFamilies=AF_UNIX
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+SystemCallArchitectures=native
 
 [Install]
 WantedBy=default.target
