@@ -1,5 +1,14 @@
 # Release notes
 
+## 1.1.18
+
+- Ships eXpress plugin 2.3.10 and removes the five-minute renderer reload from
+  desktop monitoring. Polling now reads the active allowlisted chat without
+  mutating the official client's authenticated session.
+- Removes composer-mismatch reloads. A stuck composer now fails closed after
+  bounded staging attempts; renderer reload remains limited to a confirmed
+  fatal renderer error.
+
 ## 1.1.17
 
 - Keeps Chromium shared-memory buffers in `/dev/shm` instead of redirecting

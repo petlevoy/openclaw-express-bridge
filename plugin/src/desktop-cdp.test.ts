@@ -128,6 +128,10 @@ describe("eXpress desktop CDP bridge", () => {
     ).rejects.toThrow(/safe 1800-character limit/);
   });
 
+  it("does not expose a proactive renderer refresh operation", () => {
+    expect("refreshAllowed" in ExpressDesktopClient.prototype).toBe(false);
+  });
+
   it("reloads a recognized renderer error once before UUID routing", async () => {
     const chatId = "00000000-0000-4000-8000-000000000006";
     const client = new ExpressDesktopClient({
@@ -262,12 +266,11 @@ describe("eXpress desktop CDP bridge", () => {
     expect(rpcRequest).not.toHaveBeenCalled();
   });
 
-  it("self-heals a stuck native text composer before sending", async () => {
+  it("fails closed on a stuck composer without reloading the renderer", async () => {
     vi.useFakeTimers();
     try {
       const chatId = "00000000-0000-4000-8000-000000000008";
-      const deliveredId = "00000000-0000-4000-8000-000000000009";
-      const text = "self-healing reply";
+      const text = "stuck reply";
       const client = new ExpressDesktopClient({
         cdpUrl: "http://127.0.0.1:18997",
         chats: [{ chatId, chatTitle: "Approved" }],
@@ -281,19 +284,6 @@ describe("eXpress desktop CDP bridge", () => {
         ownMessages: [],
         lastOwnMessageId: null,
       };
-      const deliveredSnapshot = {
-        ...snapshot,
-        ownMessages: [
-          {
-            id: deliveredId,
-            senderId: "",
-            type: "text" as const,
-            text,
-            deliveryStatus: "sent",
-          },
-        ],
-        lastOwnMessageId: deliveredId,
-      };
       const rpcRequest = vi.fn().mockResolvedValue({});
       const beforeDispatch = vi.fn().mockResolvedValue(undefined);
       const internals = client as unknown as {
@@ -306,13 +296,11 @@ describe("eXpress desktop CDP bridge", () => {
         ) => Promise<string>;
       };
       internals.rpc = { request: rpcRequest, close: () => undefined };
-      let snapshotCalls = 0;
       let prepareCalls = 0;
       let commitCalls = 0;
       internals.evaluate = async <T>(expression: string): Promise<T> => {
         if (expression.includes("chat-message-row--opponent")) {
-          snapshotCalls += 1;
-          return (snapshotCalls >= 3 ? deliveredSnapshot : snapshot) as T;
+          return snapshot as T;
         }
         if (expression.includes("rendererError")) {
           return {
@@ -327,7 +315,7 @@ describe("eXpress desktop CDP bridge", () => {
         }
         if (expression.includes("instance.handleSendMessage")) {
           commitCalls += 1;
-          return (commitCalls <= 40 ? "text-mismatch" : "sent") as T;
+          return "text-mismatch" as T;
         }
         throw new Error("unexpected expression");
       };
@@ -335,29 +323,26 @@ describe("eXpress desktop CDP bridge", () => {
       const result = internals.sendTextUnlocked(chatId, text, {
         beforeDispatch,
       });
+      const assertion = expect(result).rejects.toThrow(
+        "desktop native text send failed closed: text-mismatch",
+      );
       await vi.runAllTimersAsync();
 
-      await expect(result).resolves.toBe(deliveredId);
-      expect(prepareCalls).toBe(3);
-      expect(commitCalls).toBe(41);
+      await assertion;
+      expect(prepareCalls).toBe(2);
+      expect(commitCalls).toBe(40);
       expect(beforeDispatch).toHaveBeenCalledOnce();
-      expect(rpcRequest).toHaveBeenCalledOnce();
-      expect(rpcRequest).toHaveBeenCalledWith(
-        "Page.reload",
-        { ignoreCache: false },
-        10_000,
-      );
+      expect(rpcRequest).not.toHaveBeenCalled();
     } finally {
       vi.useRealTimers();
     }
   });
 
-  it("reconciles after composer recovery before restaging", async () => {
+  it("does not claim delivery or reload after a composer mismatch", async () => {
     vi.useFakeTimers();
     try {
       const chatId = "00000000-0000-4000-8000-000000000010";
-      const deliveredId = "00000000-0000-4000-8000-000000000011";
-      const text = "already delivered reply";
+      const text = "uncommitted reply";
       const client = new ExpressDesktopClient({
         cdpUrl: "http://127.0.0.1:18997",
         chats: [{ chatId, chatTitle: "Approved" }],
@@ -371,19 +356,6 @@ describe("eXpress desktop CDP bridge", () => {
         ownMessages: [],
         lastOwnMessageId: null,
       };
-      const deliveredSnapshot = {
-        ...snapshot,
-        ownMessages: [
-          {
-            id: deliveredId,
-            senderId: "",
-            type: "text" as const,
-            text,
-            deliveryStatus: "read",
-          },
-        ],
-        lastOwnMessageId: deliveredId,
-      };
       const rpcRequest = vi.fn().mockResolvedValue({});
       const internals = client as unknown as {
         rpc: { request: typeof rpcRequest; close: () => void };
@@ -394,13 +366,11 @@ describe("eXpress desktop CDP bridge", () => {
         ) => Promise<string>;
       };
       internals.rpc = { request: rpcRequest, close: () => undefined };
-      let snapshotCalls = 0;
       let prepareCalls = 0;
       let commitCalls = 0;
       internals.evaluate = async <T>(expression: string): Promise<T> => {
         if (expression.includes("chat-message-row--opponent")) {
-          snapshotCalls += 1;
-          return (snapshotCalls >= 2 ? deliveredSnapshot : snapshot) as T;
+          return snapshot as T;
         }
         if (expression.includes("rendererError")) {
           return {
@@ -421,12 +391,15 @@ describe("eXpress desktop CDP bridge", () => {
       };
 
       const result = internals.sendTextUnlocked(chatId, text);
+      const assertion = expect(result).rejects.toThrow(
+        "desktop native text send failed closed: text-mismatch",
+      );
       await vi.runAllTimersAsync();
 
-      await expect(result).resolves.toBe(deliveredId);
+      await assertion;
       expect(prepareCalls).toBe(2);
       expect(commitCalls).toBe(40);
-      expect(rpcRequest).toHaveBeenCalledOnce();
+      expect(rpcRequest).not.toHaveBeenCalled();
     } finally {
       vi.useRealTimers();
     }

@@ -487,8 +487,6 @@ export async function startExpressDesktopMonitor(
   });
   const roundRobin = new DesktopRoundRobin(chatRuntimes);
   let reconnectDelayMs = 1000;
-  const rendererRefreshIntervalMs = 5 * 60_000;
-  let nextRendererRefreshAt = Date.now() + rendererRefreshIntervalMs;
 
   statusSink?.({
     running: true,
@@ -503,16 +501,7 @@ export async function startExpressDesktopMonitor(
     while (!abortSignal.aborted) {
       const runtime = roundRobin.next();
       try {
-        const refreshRenderer = Date.now() >= nextRendererRefreshAt;
-        const snapshot = refreshRenderer
-          ? await client.refreshAllowed(runtime.chat.chatId)
-          : await client.snapshotAllowed(runtime.chat.chatId);
-        if (refreshRenderer) {
-          nextRendererRefreshAt = Date.now() + rendererRefreshIntervalMs;
-          log?.info?.(
-            `[${account.accountId}] eXpress desktop renderer refreshed after liveness interval`,
-          );
-        }
+        const snapshot = await client.snapshotAllowed(runtime.chat.chatId);
         client.assertSnapshotAllowed(snapshot, runtime.chat.chatId);
         reconnectDelayMs = 1000;
         statusSink?.({ lastError: watchdogLastError });

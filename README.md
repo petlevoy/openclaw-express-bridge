@@ -1,4 +1,4 @@
-# openclaw-express-bridge 1.1.17
+# openclaw-express-bridge 1.1.18
 
 `openclaw-express-bridge` is an enterprise AI integration layer that connects
 OpenClaw agents to on-premises eXpress deployments through the official Linux
@@ -48,7 +48,7 @@ grant was found in the client payload.
 Debian package:
 
 ```bash
-sudo apt install ./openclaw-express-bridge_1.1.17_amd64.deb
+sudo apt install ./openclaw-express-bridge_1.1.18_amd64.deb
 openclaw-express-bridge install
 openclaw-express-bridge install-client
 ```
@@ -56,8 +56,8 @@ openclaw-express-bridge install-client
 Portable archive:
 
 ```bash
-tar -xzf openclaw-express-bridge-1.1.17-linux-amd64.tar.gz
-cd openclaw-express-bridge-1.1.17
+tar -xzf openclaw-express-bridge-1.1.18-linux-amd64.tar.gz
+cd openclaw-express-bridge-1.1.18
 ./install.sh
 ~/.local/bin/openclaw-express-bridge install-client
 ```
@@ -115,7 +115,7 @@ checks what it needs but does not run a package manager.
 
 ## Multiple direct chats through one desktop session
 
-Plugin 2.3.9 supports `desktopChats`, an exact array allowlist that takes precedence
+Plugin 2.3.10 supports `desktopChats`, an exact array allowlist that takes precedence
 over the legacy `desktopChatId`, `desktopChatTitle`, `desktopSenderId` and
 `desktopSenderName` fields. One monitor and one official desktop client/CDP
 serve all enabled entries. Do not run a second monitor or desktop client against
@@ -204,11 +204,12 @@ its standard channel adapter participate in the endpoint-wide UI mutex.
 
 Desktop text is limited to 1,800 characters per chunk. The bridge writes and
 sends through the official client's verified `ChatInputText` component instead
-of injecting one large synthetic keyboard payload into Slate. If the client
-shows its fatal “Something went wrong” screen, the bridge performs one
-controlled renderer reload and waits for authentication. A send interrupted by
-that recovery is reconciled against a new exact own-message ID and body; an
-unresolved delivery is not blindly retried.
+of injecting one large synthetic keyboard payload into Slate. Normal polling
+and composer mismatch handling never reload an authenticated renderer. If the
+client already shows its fatal “Something went wrong” screen, the bridge
+performs one controlled renderer reload and waits for authentication. A send
+interrupted by that recovery is reconciled against a new exact own-message ID
+and body; an unresolved delivery is not blindly retried.
 
 ### Cancellation, reloads and long-running work
 
@@ -388,7 +389,7 @@ streaming. Non-loopback CTS endpoints must use HTTPS.
 
 ## Feature scope matrix
 
-| Requirement | 1.1.17 state |
+| Requirement | 1.1.18 state |
 |---|---|
 | Native OpenClaw channel lifecycle | Implemented |
 | Default/named account configuration | Implemented; multiple chats share one serialized desktop client/CDP session |

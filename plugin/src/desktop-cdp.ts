@@ -1549,21 +1549,6 @@ export class ExpressDesktopClient {
     return this.withUiLock(() => this.ensureTargetActive(targetChatId));
   }
 
-  /**
-   * Periodically reload the long-lived Electron renderer under the shared UI
-   * lock. The official client can remain CDP-responsive while its live chat
-   * data stops advancing, which otherwise leaves inbound messages invisible
-   * to the monitor without producing a transport error.
-   */
-  async refreshAllowed(targetChatId: string): Promise<DesktopSnapshot> {
-    return this.withUiLock(async () => {
-      const target = this.resolveTarget(targetChatId);
-      await this.ensureTargetActive(target.chatId);
-      await this.reloadRendererUnlocked();
-      return this.ensureTargetActive(target.chatId, false);
-    });
-  }
-
   async textActionAvailable(targetChatId: string): Promise<boolean> {
     return this.withUiLock(async () => {
       const target = this.resolveTarget(targetChatId);
@@ -1615,32 +1600,10 @@ export class ExpressDesktopClient {
       throw new Error("desktop message composer is unavailable");
     try {
       await hooks?.beforeDispatch?.(before);
-      let dispatched = await this.stageAndDispatchTextUnlocked(
+      const dispatched = await this.stageAndDispatchTextUnlocked(
         target.chatId,
         safeText,
       );
-      if (dispatched === "text-mismatch") {
-        // A long-lived official client can leave ChatInputText mounted while
-        // its backing Slate/React state stops accepting setInputText(). Since
-        // handleSendMessage() is never invoked on a text mismatch, it is safe
-        // to reload the renderer, reconcile against the pre-send baseline and
-        // restage once the exact allowlisted chat is active again.
-        await this.reloadRendererUnlocked();
-        const afterRecovery = await this.ensureTargetActive(
-          target.chatId,
-          false,
-        );
-        const recoveredMessageId = confirmedDesktopOutboundTextMessageId(
-          before,
-          afterRecovery,
-          safeText,
-        );
-        if (recoveredMessageId) return recoveredMessageId;
-        dispatched = await this.stageAndDispatchTextUnlocked(
-          target.chatId,
-          safeText,
-        );
-      }
       if (dispatched !== "sent") {
         throw new Error(
           `desktop native text send failed closed: ${dispatched}`,
