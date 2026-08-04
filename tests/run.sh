@@ -62,7 +62,9 @@ fi
 echo "OK: unit files parsed (missing runtime paths are expected before install)"
 
 echo "[4/7] CLI smoke and dry-run installer"
-test "$(OPENCLAW_EXPRESS_BRIDGE_ROOT="$ROOT" "$ROOT/bin/openclaw-express-bridge" version)" = "1.1.18"
+# Compare against the packaged VERSION rather than a literal: a hardcoded
+# number silently goes stale and fails the next release instead of the CLI.
+test "$(OPENCLAW_EXPRESS_BRIDGE_ROOT="$ROOT" "$ROOT/bin/openclaw-express-bridge" version)" = "$(cat "$ROOT/VERSION")"
 OPENCLAW_EXPRESS_BRIDGE_ROOT="$ROOT" "$ROOT/bin/openclaw-express-bridge" --help >/dev/null
 smoke_home=$(mktemp -d)
 trap 'rm -rf "$smoke_home" "$agent_root"; rm -f "$generator_input" "$generator_output" "$agent_input" "$agent_output"' EXIT

@@ -17,6 +17,13 @@
   websocket, and keeps read-only evaluations out of the cross-process lease.
 - Ages out quarantined inbound events after seven days. The ids stay
   suppressed but stop reporting a permanent watchdog incident.
+- Fixes the artifact secret scan. A missing `rg` made the scanner's `if`
+  condition false, which fell through to the success message: the gate
+  reported a clean artifact without reading a byte. It now selects an
+  available scanner, falls back to `grep`, and fails when neither exists or
+  the scan errors.
+- Verifies the packaged VERSION in the CLI smoke test instead of a literal
+  that had to be edited by hand for every release.
 
 ## 1.1.18
 
