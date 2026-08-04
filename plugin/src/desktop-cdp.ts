@@ -2279,9 +2279,11 @@ export class DesktopDedupeStore {
         this.loadedRevision = this.coordinator.revision;
         return false;
       }
-      // Pre-v6 files carry no per-event timestamp; the file's own mtime is the
-      // most recent moment any of those entries can have been written.
-      const legacyQuarantinedAt = Date.parse(state.updatedAt ?? "");
+      // Pre-v6 files carry no per-event timestamp, and `updatedAt` tracks the
+      // whole file, so it says nothing about when an event was quarantined.
+      // Treat an unknown age as already expired: the id stays suppressed, and
+      // an incident nobody can date stops being reported as current.
+      const legacyQuarantinedAt = 0;
       for (const id of state.seen ?? []) this.seen.add(id);
       if (state.version >= 3) {
         for (const id of state.acknowledged ?? []) {
@@ -2306,10 +2308,7 @@ export class DesktopDedupeStore {
         const quarantinedEntries: Array<[string, number]> = Array.isArray(
           quarantined,
         )
-          ? quarantined.map((id) => [
-              id,
-              Number.isFinite(legacyQuarantinedAt) ? legacyQuarantinedAt : 0,
-            ])
+          ? quarantined.map((id) => [id, legacyQuarantinedAt])
           : Object.entries(quarantined).map(([id, at]) => [
               id,
               Number.isFinite(at) ? at : 0,

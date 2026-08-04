@@ -9,6 +9,7 @@ import type { DesktopSnapshot } from "./desktop-cdp.js";
 const JOURNAL_VERSION = 2;
 const JOURNAL_MAX_ENTRIES = 256;
 const JOURNAL_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+export const JOURNAL_UNRESOLVED_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 
 export interface DesktopDeliveryAttempt {
   id: string;
@@ -244,11 +245,33 @@ async function mutateJournal<T>(
   });
 }
 
+/**
+ * Forget attempts that were never confirmed and are far older than any live
+ * delivery. Their messages have long left the visible history, so they can
+ * never be reconciled and only keep the watchdog permanently red.
+ */
+export function pruneUnresolvedDesktopDeliveryEntries(
+  journal: DesktopDeliveryJournal,
+  now = Date.now(),
+  maxAgeMs = JOURNAL_UNRESOLVED_MAX_AGE_MS,
+): number {
+  let removed = 0;
+  for (const [queueId, entry] of Object.entries(journal.entries)) {
+    if (!desktopDeliveryEntryNeedsReconciliation(entry)) continue;
+    if (now - entry.updatedAt < maxAgeMs) continue;
+    delete journal.entries[queueId];
+    removed += 1;
+  }
+  return removed;
+}
+
 export async function initializeDesktopDeliveryJournal(
   account: ResolvedExpressAccount,
-): Promise<void> {
-  if (account.mode !== "desktop") return;
-  await mutateJournal(account, () => undefined);
+): Promise<number> {
+  if (account.mode !== "desktop") return 0;
+  return mutateJournal(account, (journal) =>
+    pruneUnresolvedDesktopDeliveryEntries(journal),
+  );
 }
 
 export async function recordDesktopDeliveryDispatch(
