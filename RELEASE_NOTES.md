@@ -1,5 +1,23 @@
 # Release notes
 
+## 1.1.19
+
+- Ships eXpress plugin 2.4.0. Idle monitoring no longer rotates the active
+  chat: the always-mounted chat list reports `lastEventSyncId` and the unread
+  counters for every allowlisted chat in one read, and a chat is opened only
+  when its marker changed. A configurable full sweep still opens every chat
+  periodically, and a chat the list does not describe is always treated as
+  unknown rather than quiet.
+- Re-delivers an already-generated final instead of re-running the turn when
+  the official client failed to confirm it. Delivery faults no longer cost a
+  second and third model run.
+- Sends every fragment and file of one reply under a single UI lease, so a
+  concurrent poll can no longer navigate away between chunks.
+- Retries a single timed-out CDP command before tearing down a healthy
+  websocket, and keeps read-only evaluations out of the cross-process lease.
+- Ages out quarantined inbound events after seven days. The ids stay
+  suppressed but stop reporting a permanent watchdog incident.
+
 ## 1.1.18
 
 - Ships eXpress plugin 2.3.10 and removes the five-minute renderer reload from

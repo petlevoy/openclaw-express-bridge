@@ -17,6 +17,7 @@ import {
   isDesktopPriorityAbortMessage,
   processDesktopInboundEvent,
   resolveDesktopDurableTextDelivery,
+  selectDesktopDueChats,
   validateDesktopExactAllowlist,
   validateDesktopExactPeerRoutes,
 } from "./desktop-monitor.js";
@@ -353,5 +354,112 @@ describe("desktop inbound event isolation", () => {
     ).resolves.toBe("delivered");
     expect(store.has(inbound.id)).toBe(true);
     expect(store.hasInboundClaim(inbound.id)).toBe(false);
+  });
+});
+
+describe("desktop idle chat-list watch", () => {
+  const chatId = "00000000-0000-4000-8000-00000000aaaa";
+  const otherChatId = "00000000-0000-4000-8000-00000000bbbb";
+  const runtime = (overrides: Partial<Runtime> = {}): Runtime => ({
+    chat: { chatId },
+    needsBaseline: false,
+    lastEventSyncId: "sync-one",
+    lastFullCheckAt: 1_000,
+    ...overrides,
+  });
+  type Runtime = {
+    chat: { chatId: string };
+    needsBaseline: boolean;
+    lastEventSyncId?: string | null;
+    lastFullCheckAt: number;
+  };
+  const digest = (
+    entries: Array<{
+      chatId: string;
+      lastEventSyncId: string | null;
+      unreadCounter?: number;
+      mentionCounter?: number;
+    }>,
+  ) => ({
+    authenticated: true,
+    chatListReady: true,
+    entries: entries.map((entry) => ({
+      unreadCounter: 0,
+      mentionCounter: 0,
+      lastEventSenderId: null,
+      ...entry,
+    })),
+  });
+  const select = (runtimes: Runtime[], list: ReturnType<typeof digest>) =>
+    selectDesktopDueChats({
+      runtimes,
+      digest: list,
+      now: 2_000,
+      fullSweepIntervalMs: 300_000,
+    });
+
+  it("leaves an unchanged chat closed so the client stays idle", () => {
+    const due = select(
+      [runtime()],
+      digest([{ chatId, lastEventSyncId: "sync-one" }]),
+    );
+    expect(due).toEqual([]);
+  });
+
+  it("opens a chat whose last event changed", () => {
+    const due = select(
+      [runtime()],
+      digest([{ chatId, lastEventSyncId: "sync-two" }]),
+    );
+    expect(due).toHaveLength(1);
+  });
+
+  it("opens a chat with unread or mentioned traffic", () => {
+    expect(
+      select(
+        [runtime()],
+        digest([{ chatId, lastEventSyncId: "sync-one", unreadCounter: 1 }]),
+      ),
+    ).toHaveLength(1);
+    expect(
+      select(
+        [runtime()],
+        digest([{ chatId, lastEventSyncId: "sync-one", mentionCounter: 1 }]),
+      ),
+    ).toHaveLength(1);
+  });
+
+  it("treats a chat the list does not describe as unknown, never as quiet", () => {
+    const due = select(
+      [runtime()],
+      digest([{ chatId: otherChatId, lastEventSyncId: "sync-one" }]),
+    );
+    expect(due).toHaveLength(1);
+  });
+
+  it("still sweeps every chat on the configured interval", () => {
+    const due = selectDesktopDueChats({
+      runtimes: [runtime({ lastFullCheckAt: 0 })],
+      digest: digest([{ chatId, lastEventSyncId: "sync-one" }]),
+      now: 400_000,
+      fullSweepIntervalMs: 300_000,
+    });
+    expect(due).toHaveLength(1);
+  });
+
+  it("always opens a chat that still needs its baseline", () => {
+    const due = select(
+      [runtime({ needsBaseline: true })],
+      digest([{ chatId, lastEventSyncId: "sync-one" }]),
+    );
+    expect(due).toHaveLength(1);
+  });
+
+  it("reports a first observation as due before any marker is recorded", () => {
+    const due = select(
+      [runtime({ lastEventSyncId: undefined })],
+      digest([{ chatId, lastEventSyncId: "sync-one" }]),
+    );
+    expect(due).toHaveLength(1);
   });
 });
