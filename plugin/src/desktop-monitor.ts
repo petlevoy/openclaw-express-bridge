@@ -18,6 +18,7 @@ import {
 import {
   DEFAULT_DESKTOP_MEDIA_MAX_MB,
   DEFAULT_DESKTOP_TEXT_CHUNK_LIMIT,
+  type DesktopChatListDigest,
   desktopClientFromAccount,
   DesktopDedupeStore,
   type DesktopMessage,
@@ -28,6 +29,10 @@ import {
   desktopDeliveryEntryNeedsReconciliation,
   loadDesktopDeliveryJournal,
 } from "./desktop-delivery-journal.js";
+import {
+  type DesktopCachedReply,
+  DesktopFinalReplyCache,
+} from "./desktop-reply-cache.js";
 import { desktopReplySender, desktopRoutePeer } from "./desktop-routing.js";
 import {
   DesktopDispatchRateLimiter,
@@ -47,6 +52,11 @@ import type { DesktopChatConfig } from "./types.js";
 export const DESKTOP_INBOUND_EVENT_MAX_ATTEMPTS = 3;
 export const MIN_DESKTOP_CHAT_SWITCH_INTERVAL_MS = 1_000;
 const DEFAULT_DESKTOP_DISPATCH_CONCURRENCY = 2;
+/**
+ * Even when the chat list reports no change, open every chat this often. It
+ * bounds the damage if the client ever stops refreshing a list entry.
+ */
+export const DEFAULT_DESKTOP_FULL_SWEEP_INTERVAL_MS = 300_000;
 
 export class DesktopInboundReplyDeliveryError extends Error {
   constructor(readonly detail: string) {
@@ -182,6 +192,46 @@ interface DesktopChatRuntime {
   store: DesktopDedupeStore;
   needsBaseline: boolean;
   pendingIds: Set<string>;
+  /** Last chat-list activity marker this chat was reconciled against. */
+  lastEventSyncId?: string | null;
+  /** When this chat was last opened and read in full. */
+  lastFullCheckAt: number;
+}
+
+/**
+ * Decide which chats actually need the expensive exact navigation.
+ *
+ * Opening a chat re-renders the official client, so it must happen only when
+ * something changed. A chat the digest does not describe is treated as
+ * unknown and checked, never as quiet: missing a message is far worse than
+ * one redundant navigation.
+ */
+export function selectDesktopDueChats<
+  T extends {
+    chat: { chatId: string };
+    needsBaseline: boolean;
+    lastEventSyncId?: string | null;
+    lastFullCheckAt: number;
+  },
+>(params: {
+  runtimes: readonly T[];
+  digest: DesktopChatListDigest;
+  now: number;
+  fullSweepIntervalMs: number;
+}): T[] {
+  const byChatId = new Map(
+    params.digest.entries.map((entry) => [entry.chatId.toLowerCase(), entry]),
+  );
+  return params.runtimes.filter((runtime) => {
+    if (runtime.needsBaseline) return true;
+    if (params.now - runtime.lastFullCheckAt >= params.fullSweepIntervalMs) {
+      return true;
+    }
+    const entry = byChatId.get(runtime.chat.chatId.toLowerCase());
+    if (!entry) return true;
+    if (entry.unreadCounter > 0 || entry.mentionCounter > 0) return true;
+    return entry.lastEventSyncId !== runtime.lastEventSyncId;
+  });
 }
 
 export class DesktopActiveSessionRegistry {
@@ -399,6 +449,7 @@ export async function startExpressDesktopMonitor(
       store,
       needsBaseline: !stateExisted,
       pendingIds: new Set(),
+      lastFullCheckAt: 0,
     });
   }
 
@@ -486,6 +537,11 @@ export async function startExpressDesktopMonitor(
     },
   });
   const roundRobin = new DesktopRoundRobin(chatRuntimes);
+  const replyCache = new DesktopFinalReplyCache();
+  const fullSweepIntervalMs =
+    account.config.desktopFullSweepIntervalMs ??
+    DEFAULT_DESKTOP_FULL_SWEEP_INTERVAL_MS;
+  let digestSupported = true;
   let reconnectDelayMs = 1000;
 
   statusSink?.({
@@ -494,38 +550,72 @@ export async function startExpressDesktopMonitor(
     lastError: watchdogLastError,
   });
   log?.info?.(
-    `[${account.accountId}] eXpress desktop bridge started (${chats.length} exact chat allowlist entries, exact peer routes to ${[...new Set(routes.map((route) => route.agentId))].join(",")}, cross-process CDP mutex, dispatch concurrency ${account.config.desktopDispatchConcurrency ?? DEFAULT_DESKTOP_DISPATCH_CONCURRENCY})`,
+    `[${account.accountId}] eXpress desktop bridge started (${chats.length} exact chat allowlist entries, exact peer routes to ${[...new Set(routes.map((route) => route.agentId))].join(",")}, cross-process CDP mutex, dispatch concurrency ${account.config.desktopDispatchConcurrency ?? DEFAULT_DESKTOP_DISPATCH_CONCURRENCY}, idle chat-list watch with a ${Math.floor(fullSweepIntervalMs / 1000)}s full sweep)`,
   );
 
   try {
     while (!abortSignal.aborted) {
-      const runtime = roundRobin.next();
       try {
-        const snapshot = await client.snapshotAllowed(runtime.chat.chatId);
-        client.assertSnapshotAllowed(snapshot, runtime.chat.chatId);
+        const digest = digestSupported ? await client.chatListDigest() : null;
+        if (digest?.chatListReady && digest.entries.length === 0) {
+          // The list is rendered but describes none of the allowlisted chats:
+          // the official client changed its internals. Degrade instead of
+          // silently reporting every chat as quiet.
+          digestSupported = false;
+          log?.warn?.(
+            `[${account.accountId}] eXpress desktop chat-list digest is unavailable; falling back to sequential polling`,
+          );
+        }
+        const usableDigest =
+          digestSupported && digest?.chatListReady ? digest : null;
+        const due = usableDigest
+          ? selectDesktopDueChats({
+              runtimes: chatRuntimes,
+              digest: usableDigest,
+              now: Date.now(),
+              fullSweepIntervalMs,
+            })
+          : [roundRobin.next()];
         reconnectDelayMs = 1000;
         statusSink?.({ lastError: watchdogLastError });
 
-        if (runtime.needsBaseline) {
-          await runtime.store.baseline(
-            snapshot.messages.map((message) => message.id),
-          );
-          runtime.needsBaseline = false;
-          log?.info?.(
-            `[${account.accountId}] eXpress desktop baseline recorded chat=${runtime.chat.chatId} (${snapshot.messages.length} visible inbound ids)`,
-          );
-        } else {
-          await queueSnapshotMessages(opts, {
-            runtime,
-            snapshotMessages: snapshot.messages,
-            scheduler,
-            client,
-            rateLimiter,
-            activeSessions,
-            deliveryWatchdog,
-          });
+        for (const runtime of due) {
+          assertDesktopMonitorActive(abortSignal);
+          const snapshot = await client.snapshotAllowed(runtime.chat.chatId);
+          client.assertSnapshotAllowed(snapshot, runtime.chat.chatId);
+          runtime.lastFullCheckAt = Date.now();
+          // Record the marker observed before this read: anything that arrives
+          // while the chat is open keeps the chat due for one more pass.
+          runtime.lastEventSyncId =
+            usableDigest?.entries.find(
+              (entry) => entry.chatId === runtime.chat.chatId.toLowerCase(),
+            )?.lastEventSyncId ?? null;
+
+          if (runtime.needsBaseline) {
+            await runtime.store.baseline(
+              snapshot.messages.map((message) => message.id),
+            );
+            runtime.needsBaseline = false;
+            log?.info?.(
+              `[${account.accountId}] eXpress desktop baseline recorded chat=${runtime.chat.chatId} (${snapshot.messages.length} visible inbound ids)`,
+            );
+          } else {
+            await queueSnapshotMessages(opts, {
+              runtime,
+              snapshotMessages: snapshot.messages,
+              scheduler,
+              client,
+              rateLimiter,
+              activeSessions,
+              deliveryWatchdog,
+              replyCache,
+            });
+          }
         }
-        await sleepWithAbort(pollSliceMs, abortSignal);
+        await sleepWithAbort(
+          usableDigest ? pollIntervalMs : pollSliceMs,
+          abortSignal,
+        );
       } catch (error) {
         await client.withUiLock(async () => client.close());
         const message = redactDesktopError(error);
@@ -558,6 +648,7 @@ async function queueSnapshotMessages(
     rateLimiter: DesktopDispatchRateLimiter;
     activeSessions: DesktopActiveSessionRegistry;
     deliveryWatchdog: DesktopDeliveryWatchdog;
+    replyCache: DesktopFinalReplyCache;
   },
 ): Promise<void> {
   const { account, abortSignal, log, statusSink } = opts;
@@ -568,6 +659,7 @@ async function queueSnapshotMessages(
     rateLimiter,
     activeSessions,
     deliveryWatchdog,
+    replyCache,
   } = params;
   const { chat, store, pendingIds } = runtime;
   const maxMediaBytes = Math.floor(
@@ -726,6 +818,22 @@ async function queueSnapshotMessages(
               store,
               work: async () => {
                 assertDesktopMonitorActive(abortSignal);
+                const cached = replyCache.get(message.id);
+                if (cached) {
+                  // The turn already ran; only its delivery failed.
+                  await acknowledgement?.stop();
+                  log?.info?.(
+                    `[${account.accountId}] eXpress desktop redelivering cached final chat=${chat.chatId} id=${message.id}`,
+                  );
+                  await redeliverDesktopCachedFinal({
+                    opts,
+                    chat,
+                    client,
+                    cached,
+                  });
+                  replyCache.clear(message.id);
+                  return;
+                }
                 const prepared = await prepareDesktopInbound(
                   opts,
                   chat,
@@ -741,7 +849,9 @@ async function queueSnapshotMessages(
                   client,
                   acknowledgement,
                   activeSessions,
+                  replyCache,
                 );
+                replyCache.clear(message.id);
                 assertDesktopMonitorActive(abortSignal);
               },
               onDiagnostic: (outcome, attempt, diagnostic) =>
@@ -768,6 +878,114 @@ async function queueSnapshotMessages(
         `[${account.accountId}] eXpress desktop per-chat queue full chat=${chat.chatId}`,
       );
     }
+  }
+}
+
+function toCachedReply(payload: {
+  text?: string;
+  mediaUrl?: string;
+  mediaUrls?: string[];
+}): DesktopCachedReply {
+  const mediaUrls = payload.mediaUrls?.length
+    ? payload.mediaUrls
+    : payload.mediaUrl
+      ? [payload.mediaUrl]
+      : undefined;
+  return { text: payload.text, mediaUrls };
+}
+
+/**
+ * Send one reply payload under a single UI lease.
+ *
+ * Taking the lease per fragment let the poll loop switch chats between the
+ * chunks of one answer, which forced the client to navigate back and forth.
+ * Both interlocks are still re-checked before every individual send.
+ */
+async function deliverDesktopPayload(params: {
+  opts: ExpressMonitorOptions;
+  chat: DesktopChatConfig;
+  client: ReturnType<typeof desktopClientFromAccount>;
+  payload: { text?: string; mediaUrl?: string; mediaUrls?: string[] };
+}): Promise<void> {
+  const { opts, chat, client, payload } = params;
+  const { account, abortSignal, statusSink } = opts;
+  const core = getExpressRuntime();
+  const replySender = desktopReplySender(chat, client);
+  const chunks = payload.text?.trim()
+    ? core.channel.text.chunkText(
+        toPlainText(payload.text).trim(),
+        Math.min(
+          account.config.textChunkLimit ?? DEFAULT_DESKTOP_TEXT_CHUNK_LIMIT,
+          DEFAULT_DESKTOP_TEXT_CHUNK_LIMIT,
+        ),
+      )
+    : [];
+  const media = payload.mediaUrls?.length
+    ? payload.mediaUrls
+    : payload.mediaUrl
+      ? [payload.mediaUrl]
+      : [];
+  if (!chunks.length && !media.length) return;
+
+  await client.withUiLock(async () => {
+    for (const chunk of chunks) {
+      assertDesktopMonitorActive(abortSignal);
+      if (!(await isDesktopOutboundUnlocked(account))) {
+        throw new Error("desktop eXpress outbound was locked during reply");
+      }
+      await replySender.sendText(chunk);
+      statusSink?.({ lastOutboundAt: Date.now() });
+    }
+    for (const mediaUrl of media) {
+      assertDesktopMonitorActive(abortSignal);
+      if (!(await isDesktopOutboundUnlocked(account))) {
+        throw new Error("desktop eXpress outbound was locked during reply");
+      }
+      const file = await validateDesktopOutboundFile(
+        mediaUrl,
+        account.config.mediaMaxMb ?? DEFAULT_DESKTOP_MEDIA_MAX_MB,
+        account.config.desktopMediaRoots,
+      );
+      assertDesktopMonitorActive(abortSignal);
+      if (!(await isDesktopOutboundUnlocked(account))) {
+        throw new Error(
+          "desktop eXpress outbound was locked during file validation",
+        );
+      }
+      await replySender.sendFile(file);
+      statusSink?.({ lastOutboundAt: Date.now() });
+    }
+  });
+}
+
+/**
+ * Re-send a final that was already generated. Transport faults keep their
+ * own identity so the monitor can still reconnect; anything else counts as
+ * another invisible delivery, which advances the bounded retry.
+ */
+async function redeliverDesktopCachedFinal(params: {
+  opts: ExpressMonitorOptions;
+  chat: DesktopChatConfig;
+  client: ReturnType<typeof desktopClientFromAccount>;
+  cached: DesktopCachedReply;
+}): Promise<void> {
+  const { opts, chat, client, cached } = params;
+  if (!(await isDesktopOutboundUnlocked(opts.account))) {
+    opts.log?.info?.(
+      `[${opts.account.accountId}] eXpress desktop cached reply withheld by outbound interlock`,
+    );
+    return;
+  }
+  try {
+    await deliverDesktopPayload({
+      opts,
+      chat,
+      client,
+      payload: { text: cached.text, mediaUrls: cached.mediaUrls },
+    });
+  } catch (error) {
+    if (isDesktopTransportFailure(error)) throw error;
+    throw new DesktopInboundReplyDeliveryError(redactDesktopError(error));
   }
 }
 
@@ -817,6 +1035,7 @@ async function dispatchDesktopInbound(
   client: ReturnType<typeof desktopClientFromAccount>,
   acknowledgement?: DesktopAckHandle,
   activeSessions?: DesktopActiveSessionRegistry,
+  replyCache?: DesktopFinalReplyCache,
 ): Promise<void> {
   const { account, abortSignal, config, log, statusSink } = opts;
   const { text, attachmentText, mediaPaths, mediaTypes } = prepared;
@@ -835,7 +1054,6 @@ async function dispatchDesktopInbound(
     accountId: account.accountId,
     peer: desktopRoutePeer(chat),
   });
-  const replySender = desktopReplySender(chat, client);
   const senderName = chat.senderName ?? chat.chatTitle;
   const fromLabel = senderName
     ? `${senderName} (${chat.senderId})`
@@ -921,11 +1139,14 @@ async function dispatchDesktopInbound(
           if (!(await isDesktopOutboundUnlocked(account))) return false;
           return durableDelivery;
         },
-        deliver: async (payload: {
-          text?: string;
-          mediaUrls?: string[];
-          mediaUrl?: string;
-        }) => {
+        deliver: async (
+          payload: {
+            text?: string;
+            mediaUrls?: string[];
+            mediaUrl?: string;
+          },
+          info?: { kind?: string },
+        ) => {
           await acknowledgement?.stop();
           assertDesktopMonitorActive(abortSignal);
           if (!(await isDesktopOutboundUnlocked(account))) {
@@ -934,52 +1155,13 @@ async function dispatchDesktopInbound(
             );
             return;
           }
-          if (payload.text?.trim()) {
-            const chunks = core.channel.text.chunkText(
-              toPlainText(payload.text).trim(),
-              Math.min(
-                account.config.textChunkLimit ??
-                  DEFAULT_DESKTOP_TEXT_CHUNK_LIMIT,
-                DEFAULT_DESKTOP_TEXT_CHUNK_LIMIT,
-              ),
-            );
-            for (const chunk of chunks) {
-              assertDesktopMonitorActive(abortSignal);
-              if (!(await isDesktopOutboundUnlocked(account))) {
-                throw new Error(
-                  "desktop eXpress outbound was locked during reply",
-                );
-              }
-              await replySender.sendText(chunk);
-              statusSink?.({ lastOutboundAt: Date.now() });
-            }
+          // The model has already produced this final and the tokens are
+          // spent. Remember it before the first attempt so a transport-only
+          // failure re-sends the text instead of re-running the turn.
+          if (info?.kind === "final") {
+            replyCache?.remember(message.id, toCachedReply(payload));
           }
-          const media = payload.mediaUrls?.length
-            ? payload.mediaUrls
-            : payload.mediaUrl
-              ? [payload.mediaUrl]
-              : [];
-          for (const mediaUrl of media) {
-            assertDesktopMonitorActive(abortSignal);
-            if (!(await isDesktopOutboundUnlocked(account))) {
-              throw new Error(
-                "desktop eXpress outbound was locked during reply",
-              );
-            }
-            const file = await validateDesktopOutboundFile(
-              mediaUrl,
-              account.config.mediaMaxMb ?? DEFAULT_DESKTOP_MEDIA_MAX_MB,
-              account.config.desktopMediaRoots,
-            );
-            assertDesktopMonitorActive(abortSignal);
-            if (!(await isDesktopOutboundUnlocked(account))) {
-              throw new Error(
-                "desktop eXpress outbound was locked during file validation",
-              );
-            }
-            await replySender.sendFile(file);
-            statusSink?.({ lastOutboundAt: Date.now() });
-          }
+          await deliverDesktopPayload({ opts, chat, client, payload });
         },
         onDelivered: (_payload, _info, result) => {
           deliveryTracker.observe(_info.kind, result);

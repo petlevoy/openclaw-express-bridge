@@ -4,6 +4,7 @@ import {
   type DesktopDeliveryJournal,
   desktopDeliveryTextSha256,
   parseDesktopDeliveryJournal,
+  pruneUnresolvedDesktopDeliveryEntries,
   reconcileDesktopDeliveryEntry,
 } from "./desktop-delivery-journal.js";
 
@@ -153,5 +154,50 @@ describe("reconcileDesktopDeliveryEntry", () => {
       textSha256: desktopDeliveryTextSha256("private answer"),
     });
     expect(JSON.stringify(migrated)).not.toContain("private answer");
+  });
+});
+
+describe("desktop delivery journal ageing", () => {
+  const journal = (updatedAt: number, messageId?: string) => ({
+    version: 2 as const,
+    initializedAt: 0,
+    entries: {
+      "queue-one": {
+        queueId: "queue-one",
+        chatId: "00000000-0000-4000-8000-00000000aaaa",
+        attempts: [
+          {
+            id: "attempt-one",
+            textSha256: "sha",
+            baselineOwnMessageIds: [],
+            dispatchedAt: updatedAt,
+            messageId,
+          },
+        ],
+        updatedAt,
+      },
+    },
+  });
+
+  it("forgets an unconfirmed attempt that can no longer be reconciled", () => {
+    const stale = journal(0);
+    expect(
+      pruneUnresolvedDesktopDeliveryEntries(stale, 48 * 60 * 60 * 1000),
+    ).toBe(1);
+    expect(Object.keys(stale.entries)).toEqual([]);
+  });
+
+  it("keeps a recent unconfirmed attempt so recovery can still resolve it", () => {
+    const recent = journal(0);
+    expect(pruneUnresolvedDesktopDeliveryEntries(recent, 60_000)).toBe(0);
+    expect(Object.keys(recent.entries)).toEqual(["queue-one"]);
+  });
+
+  it("keeps confirmed evidence regardless of age", () => {
+    const confirmed = journal(0, "message-one");
+    expect(
+      pruneUnresolvedDesktopDeliveryEntries(confirmed, 48 * 60 * 60 * 1000),
+    ).toBe(0);
+    expect(Object.keys(confirmed.entries)).toEqual(["queue-one"]);
   });
 });

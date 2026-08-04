@@ -146,11 +146,32 @@ export const DESKTOP_COMPOSER_SYNC_ATTEMPTS = 20;
 export const DESKTOP_COMPOSER_SYNC_POLL_MS = 100;
 export const DESKTOP_COMPOSER_STAGE_ATTEMPTS = 2;
 export const DESKTOP_RENDERER_AUTH_WAIT_ATTEMPTS = 60;
+/**
+ * A single command may time out because the renderer was briefly busy. Retry
+ * that command once before tearing down a healthy websocket.
+ */
+export const DESKTOP_EVALUATE_ATTEMPTS = 2;
+export const DESKTOP_EVALUATE_RETRY_DELAY_MS = 250;
 
 export interface DesktopPageState {
   authenticated: boolean;
   chatListReady: boolean;
   rendererError: boolean;
+}
+
+/** One allowlisted chat as reported by the always-mounted chat list. */
+export interface DesktopChatDigestEntry {
+  chatId: string;
+  lastEventSyncId: string | null;
+  unreadCounter: number;
+  mentionCounter: number;
+  lastEventSenderId: string | null;
+}
+
+export interface DesktopChatListDigest {
+  authenticated: boolean;
+  chatListReady: boolean;
+  entries: DesktopChatDigestEntry[];
 }
 
 export type DesktopOpenChatResult = "active" | "entry" | "router" | "missing";
@@ -165,7 +186,7 @@ export type DesktopPrepareTextResult =
   "prepared" | "composer-missing" | "native-action-missing" | "chat-mismatch";
 
 interface DedupeState {
-  version: 2 | 3 | 4 | 5;
+  version: 2 | 3 | 4 | 5 | 6;
   seen: string[];
   acknowledged?: string[];
   /**
@@ -174,9 +195,17 @@ interface DedupeState {
    */
   claimed?: string[] | Record<string, string>;
   failures?: Record<string, number>;
-  quarantined?: string[];
+  /** Version 6 records when each event was quarantined. */
+  quarantined?: string[] | Record<string, number>;
   updatedAt: string;
 }
+
+/**
+ * A quarantined event is never retried, so an unbounded quarantine only keeps
+ * the health status permanently red. After this age the id is demoted to the
+ * ordinary seen set: still suppressed, but no longer reported as an incident.
+ */
+export const DESKTOP_QUARANTINE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
 export interface DesktopFailureDisposition {
   attempt: number;
@@ -327,17 +356,44 @@ async function acquireDesktopUiFileLock(
  * The file lease protects the same CDP endpoint when a standalone OpenClaw CLI
  * process is loaded alongside the long-running Gateway.
  */
+export type DesktopUiLockMode = "exclusive" | "local";
+
 export class DesktopUiMutex {
   private tail: Promise<void> = Promise.resolve();
-  private readonly context = new AsyncLocalStorage<boolean>();
+  private readonly context = new AsyncLocalStorage<DesktopUiLockMode>();
 
   constructor(
     private readonly fileLockPath?: string,
     private readonly fileLockWaitMs = DESKTOP_UI_LOCK_WAIT_MS,
   ) {}
 
+  /** Serialize UI-mutating work against every process on this endpoint. */
   async runExclusive<T>(work: () => Promise<T>): Promise<T> {
-    if (this.context.getStore()) return work();
+    return this.run("exclusive", work);
+  }
+
+  /**
+   * Serialize against this process only, without the cross-process lease.
+   * Valid solely for work that cannot change what the client displays: the
+   * idle poll would otherwise make a standalone CLI wait on a filesystem
+   * lease it never needed.
+   */
+  async runLocal<T>(work: () => Promise<T>): Promise<T> {
+    return this.run("local", work);
+  }
+
+  private async run<T>(
+    mode: DesktopUiLockMode,
+    work: () => Promise<T>,
+  ): Promise<T> {
+    const current = this.context.getStore();
+    if (current === "exclusive") return work();
+    if (current === "local") {
+      if (mode === "local") return work();
+      throw new Error(
+        "desktop eXpress UI lock cannot escalate from a read-only section",
+      );
+    }
     const previous = this.tail;
     let release!: () => void;
     this.tail = new Promise<void>((resolvePromise) => {
@@ -346,13 +402,13 @@ export class DesktopUiMutex {
     await previous;
     let releaseFileLock: (() => Promise<void>) | undefined;
     try {
-      if (this.fileLockPath) {
+      if (mode === "exclusive" && this.fileLockPath) {
         releaseFileLock = await acquireDesktopUiFileLock(
           this.fileLockPath,
           this.fileLockWaitMs,
         );
       }
-      return await this.context.run(true, work);
+      return await this.context.run(mode, work);
     } finally {
       try {
         await releaseFileLock?.();
@@ -927,6 +983,67 @@ export function buildDesktopPageStateExpression(): string {
 }
 
 /**
+ * Read the always-mounted chat list without touching the active chat.
+ *
+ * The official client keeps `lastEventSyncId` and the unread counters on every
+ * chat-list entry, so a single evaluation reports whether any allowlisted chat
+ * has new traffic. Only chats whose digest changed need the expensive exact
+ * navigation, which keeps the renderer idle while nothing is happening.
+ */
+export function buildDesktopChatListDigestExpression(
+  chatIds: readonly string[],
+): string {
+  const wanted = JSON.stringify(chatIds.map((chatId) => chatId.toLowerCase()));
+  return String.raw`(() => {
+    const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    const wanted = new Set(${wanted});
+    function chatFor(node) {
+      const fiberKey = Object.getOwnPropertyNames(node)
+        .find((key) => key.startsWith('__reactFiber$'));
+      let fiber = fiberKey ? node[fiberKey] : null;
+      for (let index = 0; fiber && index < 12; index += 1, fiber = fiber.return) {
+        const chat = fiber.memoizedProps?.chat;
+        if (chat && typeof chat === 'object' && typeof chat.groupChatId === 'string') {
+          return chat;
+        }
+      }
+      return null;
+    }
+    function counter(value) {
+      return Number.isSafeInteger(value) && value > 0 ? value : 0;
+    }
+    const entries = [];
+    const claimed = new Set();
+    for (const node of document.querySelectorAll('.chat-list-entry')) {
+      const chat = chatFor(node);
+      if (!chat) continue;
+      const chatId = String(chat.groupChatId).toLowerCase();
+      if (!wanted.has(chatId) || claimed.has(chatId)) continue;
+      claimed.add(chatId);
+      const lastEvent = chat.lastEvent;
+      const syncId = String(chat.lastEventSyncId || lastEvent?.syncId || '')
+        .trim()
+        .toLowerCase();
+      const senderId = String(lastEvent?.sender?.userHuid || '')
+        .trim()
+        .toLowerCase();
+      entries.push({
+        chatId,
+        lastEventSyncId: uuid.test(syncId) ? syncId : null,
+        unreadCounter: counter(chat.unreadCounter),
+        mentionCounter: counter(chat.mentionCounter),
+        lastEventSenderId: uuid.test(senderId) ? senderId : null,
+      });
+    }
+    return {
+      authenticated: Boolean(document.querySelector('.settings-button__avatar')),
+      chatListReady: Boolean(document.querySelector('.chat-list-entry')),
+      entries,
+    };
+  })()`;
+}
+
+/**
  * Select an exact chat UUID. A mounted matching entry is preferred; the
  * official React router is a bounded fallback for virtualized/off-screen
  * entries. The configured title is verified only after navigation.
@@ -1440,6 +1557,21 @@ export function isDesktopAttachmentMimeCompatible(
   );
 }
 
+export function isDesktopCommandTimeout(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return message.startsWith("desktop CDP command timed out");
+}
+
+/** Transient transport faults that deserve one in-place retry. */
+export function isRetryableDesktopCommandError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return (
+    isDesktopCommandTimeout(error) ||
+    message === "desktop CDP connection closed" ||
+    message === "desktop CDP connection failed"
+  );
+}
+
 function extractEvaluationValue<T>(result: Record<string, unknown>): T {
   if (result.exceptionDetails)
     throw new Error("desktop CDP evaluation raised an exception");
@@ -1491,8 +1623,15 @@ export class ExpressDesktopClient {
     return this.uiMutex.runExclusive(work);
   }
 
+  /** Run an evaluation that cannot change what the client displays. */
+  withReadLock<T>(work: () => Promise<T>): Promise<T> {
+    return this.uiMutex.runLocal(work);
+  }
+
   async connect(): Promise<void> {
-    return this.withUiLock(() => this.connectUnlocked());
+    // Establishing the socket does not touch the UI, so it never needs the
+    // cross-process lease.
+    return this.uiMutex.runLocal(() => this.connectUnlocked());
   }
 
   private async connectUnlocked(): Promise<void> {
@@ -1547,6 +1686,19 @@ export class ExpressDesktopClient {
 
   async snapshotAllowed(targetChatId: string): Promise<DesktopSnapshot> {
     return this.withUiLock(() => this.ensureTargetActive(targetChatId));
+  }
+
+  /**
+   * Report per-chat activity markers without navigating anywhere. Chats the
+   * client has not mounted are simply absent from `entries`; the caller must
+   * treat a missing chat as "unknown", never as "nothing new".
+   */
+  async chatListDigest(): Promise<DesktopChatListDigest> {
+    return this.withReadLock(() =>
+      this.evaluate<DesktopChatListDigest>(
+        buildDesktopChatListDigestExpression([...this.chats.keys()]),
+      ),
+    );
   }
 
   async textActionAvailable(targetChatId: string): Promise<boolean> {
@@ -2025,13 +2177,32 @@ export class ExpressDesktopClient {
   }
 
   private async evaluate<T>(expression: string): Promise<T> {
-    await this.connect();
-    const result = await this.requireRpc().request(
-      "Runtime.evaluate",
-      { expression, returnByValue: true, awaitPromise: true },
-      this.timeoutMs,
-    );
-    return extractEvaluationValue<T>(result);
+    let lastError: unknown;
+    for (let attempt = 0; attempt < DESKTOP_EVALUATE_ATTEMPTS; attempt += 1) {
+      await this.connect();
+      try {
+        const result = await this.requireRpc().request(
+          "Runtime.evaluate",
+          { expression, returnByValue: true, awaitPromise: true },
+          this.timeoutMs,
+        );
+        return extractEvaluationValue<T>(result);
+      } catch (error) {
+        lastError = error;
+        if (
+          !isRetryableDesktopCommandError(error) ||
+          attempt === DESKTOP_EVALUATE_ATTEMPTS - 1
+        ) {
+          throw error;
+        }
+        // A closed socket must be rebuilt; a busy renderer only needs time.
+        if (!isDesktopCommandTimeout(error)) this.close();
+        await new Promise((resolvePromise) =>
+          setTimeout(resolvePromise, DESKTOP_EVALUATE_RETRY_DELAY_MS),
+        );
+      }
+    }
+    throw lastError;
   }
 
   private requireRpc(): CdpRpc {
@@ -2064,7 +2235,7 @@ export class DesktopDedupeStore {
   private readonly acknowledged = new Set<string>();
   private readonly claimed = new Set<string>();
   private readonly failures = new Map<string, number>();
-  private readonly quarantined = new Set<string>();
+  private readonly quarantined = new Map<string, number>();
   private readonly resolvedStatePath: string;
   private readonly coordinator: DesktopDedupeCoordinator;
   private loaded = false;
@@ -2101,12 +2272,18 @@ export class DesktopDedupeStore {
         state.version !== 2 &&
         state.version !== 3 &&
         state.version !== 4 &&
-        state.version !== 5
+        state.version !== 5 &&
+        state.version !== 6
       ) {
         this.loaded = true;
         this.loadedRevision = this.coordinator.revision;
         return false;
       }
+      // Pre-v6 files carry no per-event timestamp, and `updatedAt` tracks the
+      // whole file, so it says nothing about when an event was quarantined.
+      // Treat an unknown age as already expired: the id stays suppressed, and
+      // an incident nobody can date stops being reported as current.
+      const legacyQuarantinedAt = 0;
       for (const id of state.seen ?? []) this.seen.add(id);
       if (state.version >= 3) {
         for (const id of state.acknowledged ?? []) {
@@ -2126,16 +2303,30 @@ export class DesktopDedupeStore {
             this.failures.set(id, attempts);
           }
         }
-        for (const id of state.quarantined ?? []) {
-          if (!this.seen.has(id)) {
-            this.quarantined.add(id);
-            this.acknowledged.delete(id);
-            this.failures.delete(id);
+        const now = Date.now();
+        const quarantined = state.quarantined ?? [];
+        const quarantinedEntries: Array<[string, number]> = Array.isArray(
+          quarantined,
+        )
+          ? quarantined.map((id) => [id, legacyQuarantinedAt])
+          : Object.entries(quarantined).map(([id, at]) => [
+              id,
+              Number.isFinite(at) ? at : 0,
+            ]);
+        for (const [id, quarantinedAt] of quarantinedEntries) {
+          if (this.seen.has(id)) continue;
+          this.acknowledged.delete(id);
+          this.failures.delete(id);
+          if (now - quarantinedAt >= DESKTOP_QUARANTINE_TTL_MS) {
+            // Expired: keep suppressing the id, stop reporting it.
+            this.seen.add(id);
+            continue;
           }
+          this.quarantined.set(id, quarantinedAt);
         }
       }
       if (
-        state.version === 5 &&
+        state.version >= 5 &&
         state.claimed &&
         !Array.isArray(state.claimed)
       ) {
@@ -2294,8 +2485,8 @@ export class DesktopDedupeStore {
       if (attempt >= maxAttempts) {
         this.failures.delete(id);
         this.acknowledged.delete(id);
-        this.quarantined.add(id);
-        this.trim(this.quarantined);
+        this.quarantined.set(id, Date.now());
+        this.trimMap(this.quarantined);
       } else {
         this.failures.set(id, attempt);
         this.trimMap(this.failures);
@@ -2328,7 +2519,7 @@ export class DesktopDedupeStore {
     }
   }
 
-  private trimMap(values: Map<string, number>): void {
+  private trimMap<T>(values: Map<string, T>): void {
     while (values.size > this.maxEntries) {
       const oldest = values.keys().next().value as string | undefined;
       if (!oldest) break;
@@ -2343,14 +2534,14 @@ export class DesktopDedupeStore {
     await chmod(directory, 0o700);
     const temporary = `${path}.${process.pid}.${this.coordinator.revision + 1}.tmp`;
     const state: DedupeState = {
-      version: 5,
+      version: 6,
       seen: [...this.seen],
       acknowledged: [...this.acknowledged],
       claimed: Object.fromEntries(
         [...this.claimed].map((id) => [id, desktopDedupeProcessOwner]),
       ),
       failures: Object.fromEntries(this.failures),
-      quarantined: [...this.quarantined],
+      quarantined: Object.fromEntries(this.quarantined),
       updatedAt: new Date().toISOString(),
     };
     await writeFile(temporary, `${JSON.stringify(state, null, 2)}\n`, {

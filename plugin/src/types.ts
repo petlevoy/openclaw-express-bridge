@@ -152,6 +152,7 @@ export interface ExpressAccountConfig {
   desktopDispatchConcurrency?: number;
   /** Poll interval for the already-decrypted desktop DOM. */
   desktopPollIntervalMs?: number;
+  desktopFullSweepIntervalMs?: number;
   /** Persistent deduplication state path. */
   desktopStatePath?: string;
   /** Master configuration gate for desktop outbound delivery. */
@@ -199,6 +200,7 @@ export interface ExpressChannelConfig {
   desktopChats?: DesktopChatConfig[];
   desktopDispatchConcurrency?: number;
   desktopPollIntervalMs?: number;
+  desktopFullSweepIntervalMs?: number;
   desktopStatePath?: string;
   desktopOutboundEnabled?: boolean;
   desktopOutboundSwitchPath?: string;

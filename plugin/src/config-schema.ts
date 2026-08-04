@@ -117,6 +117,12 @@ export const ExpressAccountSchemaBase = z
     desktopChats: z.array(DesktopChatSchema).min(1).max(32).optional(),
     desktopDispatchConcurrency: z.number().int().min(1).max(8).optional(),
     desktopPollIntervalMs: z.number().int().min(250).max(60_000).optional(),
+    desktopFullSweepIntervalMs: z
+      .number()
+      .int()
+      .min(30_000)
+      .max(3_600_000)
+      .optional(),
     desktopStatePath: z.string().min(1).optional(),
     desktopOutboundEnabled: z.boolean().optional(),
     desktopOutboundSwitchPath: z.string().min(1).optional(),

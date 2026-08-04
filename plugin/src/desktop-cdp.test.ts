@@ -16,6 +16,7 @@ import {
   buildDesktopAttachmentChunkExpression,
   buildDesktopAttachmentStartExpression,
   buildDesktopAttachmentStatusExpression,
+  buildDesktopChatListDigestExpression,
   buildDesktopPageStateExpression,
   buildDesktopPrepareTextExpression,
   buildDesktopSendFileExpression,
@@ -29,13 +30,16 @@ import {
   DEFAULT_DESKTOP_TEXT_CHUNK_LIMIT,
   DESKTOP_DOCUMENT_INPUT_SELECTOR,
   DESKTOP_IMAGE_INPUT_SELECTOR,
+  DESKTOP_QUARANTINE_TTL_MS,
   DESKTOP_VIDEO_INPUT_SELECTOR,
   DesktopDedupeStore,
   desktopInputSelectorFor,
   DesktopUiMutex,
   ExpressDesktopClient,
   isDesktopAttachmentMimeCompatible,
+  isDesktopCommandTimeout,
   isDesktopOutboundUnlocked,
+  isRetryableDesktopCommandError,
   normalizeLoopbackCdpSocketUrl,
   normalizeLoopbackCdpUrl,
   validateDesktopOutboundFile,
@@ -1917,7 +1921,7 @@ describe("eXpress desktop CDP bridge", () => {
       version: number;
       claimed: Record<string, string>;
     };
-    expect(raw.version).toBe(5);
+    expect(raw.version).toBe(6);
     expect(Object.keys(raw.claimed)).toEqual(["message-one"]);
     expect(raw.claimed["message-one"]).toBeTypeOf("string");
 
@@ -2019,14 +2023,15 @@ describe("eXpress desktop CDP bridge", () => {
       version: number;
       seen: string[];
       failures: Record<string, number>;
-      quarantined: string[];
+      quarantined: Record<string, number>;
     };
     expect(raw).toMatchObject({
-      version: 5,
+      version: 6,
       seen: ["healthy-two"],
       failures: {},
-      quarantined: ["poison-one"],
     });
+    expect(Object.keys(raw.quarantined)).toEqual(["poison-one"]);
+    expect(raw.quarantined["poison-one"]).toBeTypeOf("number");
   });
 
   it("loads the previous dedupe format without replaying visible messages", async () => {
@@ -2043,5 +2048,134 @@ describe("eXpress desktop CDP bridge", () => {
     const store = new DesktopDedupeStore(statePath);
     expect(await store.load()).toBe(true);
     expect(store.has("legacy-seen")).toBe(true);
+  });
+});
+
+describe("eXpress desktop idle chat-list digest", () => {
+  const chatId = "00000000-0000-4000-8000-00000000aaaa";
+
+  it("reads only the allowlisted chats", () => {
+    const expression = buildDesktopChatListDigestExpression([
+      chatId.toUpperCase(),
+    ]);
+    expect(expression).toContain(chatId);
+    expect(expression).toContain(".chat-list-entry");
+  });
+
+  it("never navigates, clicks or types while observing", () => {
+    const expression = buildDesktopChatListDigestExpression([chatId]);
+    expect(expression).not.toContain(".click(");
+    expect(expression).not.toContain("history.push");
+    expect(expression).not.toContain("setInputText");
+    expect(expression).not.toContain("handleSendMessage");
+    // Reading body text forces a full layout pass on every poll.
+    expect(expression).not.toContain("innerText");
+  });
+});
+
+describe("eXpress desktop transient command faults", () => {
+  it("retries a timed-out command before dropping the socket", () => {
+    const timeout = new Error(
+      "desktop CDP command timed out: Runtime.evaluate",
+    );
+    expect(isDesktopCommandTimeout(timeout)).toBe(true);
+    expect(isRetryableDesktopCommandError(timeout)).toBe(true);
+  });
+
+  it("treats a closed socket as retryable but not as a timeout", () => {
+    const closed = new Error("desktop CDP connection closed");
+    expect(isDesktopCommandTimeout(closed)).toBe(false);
+    expect(isRetryableDesktopCommandError(closed)).toBe(true);
+  });
+
+  it("does not retry a rejected evaluation", () => {
+    expect(
+      isRetryableDesktopCommandError(
+        new Error("desktop CDP evaluation raised an exception"),
+      ),
+    ).toBe(false);
+  });
+});
+
+describe("eXpress desktop UI lock modes", () => {
+  it("keeps a read-only section out of the cross-process lease", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "express-lock-mode-"));
+    const lockPath = join(directory, "ui.lock");
+    const mutex = new DesktopUiMutex(lockPath, 1_000);
+    let observed: string | null = null;
+    await mutex.runLocal(async () => {
+      observed = await readFile(lockPath, "utf8").catch(() => null);
+    });
+    expect(observed).toBeNull();
+  });
+
+  it("takes the cross-process lease for UI-mutating work", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "express-lock-mode-"));
+    const lockPath = join(directory, "ui.lock");
+    const mutex = new DesktopUiMutex(lockPath, 1_000);
+    let observed: string | null = null;
+    await mutex.runExclusive(async () => {
+      observed = await readFile(lockPath, "utf8").catch(() => null);
+    });
+    expect(observed).toContain('"pid"');
+  });
+
+  it("refuses to escalate a read-only section into a UI mutation", async () => {
+    const mutex = new DesktopUiMutex();
+    await expect(
+      mutex.runLocal(async () => mutex.runExclusive(async () => "unsafe")),
+    ).rejects.toThrow(/cannot escalate/);
+  });
+});
+
+describe("eXpress desktop quarantine ageing", () => {
+  it("stops reporting an expired quarantine while still suppressing it", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "express-quarantine-ttl-"));
+    const statePath = join(directory, "state.json");
+    await writeFile(
+      statePath,
+      JSON.stringify({
+        version: 5,
+        seen: [],
+        acknowledged: [],
+        claimed: {},
+        failures: {},
+        quarantined: ["stale-one"],
+        updatedAt: new Date(
+          Date.now() - DESKTOP_QUARANTINE_TTL_MS - 60_000,
+        ).toISOString(),
+      }),
+      { mode: 0o600 },
+    );
+    const store = new DesktopDedupeStore(statePath);
+    expect(await store.load()).toBe(true);
+    const health = await store.healthSnapshot();
+    expect(health.quarantined).toBe(0);
+    // Still suppressed: an aged incident must never be replayed to the model.
+    expect(store.has("stale-one")).toBe(true);
+    expect(await store.claimInbound("stale-one")).toBe(false);
+  });
+
+  it("keeps a recent quarantine visible to the watchdog", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "express-quarantine-ttl-"));
+    const statePath = join(directory, "state.json");
+    await writeFile(
+      statePath,
+      JSON.stringify({
+        version: 6,
+        seen: [],
+        acknowledged: [],
+        claimed: {},
+        failures: {},
+        quarantined: { "fresh-one": Date.now() - 1_000 },
+        updatedAt: new Date().toISOString(),
+      }),
+      { mode: 0o600 },
+    );
+    const store = new DesktopDedupeStore(statePath);
+    expect(await store.load()).toBe(true);
+    const health = await store.healthSnapshot();
+    expect(health.quarantined).toBe(1);
+    expect(store.has("fresh-one")).toBe(true);
   });
 });
