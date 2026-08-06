@@ -5,13 +5,14 @@ ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 echo "[1/7] shell syntax"
 bash -n "$ROOT/bin/openclaw-express-bridge" "$ROOT/install.sh" "$ROOT/uninstall.sh" \
   "$ROOT/lib/common.sh" "$ROOT/lib/express-keyring-service.sh" \
-  "$ROOT/lib/express-xvfb-service.sh" "$ROOT/build.sh" \
+  "$ROOT/lib/express-xvfb-service.sh" "$ROOT/lib/express-auth-watch.sh" "$ROOT/build.sh" \
   "$ROOT/tests/scan-secrets.sh"
 
 echo "[2/7] node helper syntax"
 node --check "$ROOT/helpers/cdp-screenshot.mjs"
 node --check "$ROOT/tools/generate-desktop-routing.mjs"
 node --check "$ROOT/tools/create-isolated-agent.mjs"
+node --check "$ROOT/tools/patch-client-disable-hard-reloads.mjs"
 generator_input=$(mktemp)
 generator_output=$(mktemp)
 agent_input=$(mktemp)

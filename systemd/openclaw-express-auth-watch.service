@@ -1,0 +1,16 @@
+[Unit]
+Description=Check eXpress client authentication and alert on loss
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/env bash %h/.local/share/openclaw-express-bridge/runtime/lib/express-auth-watch.sh
+# Optional Telegram alerting; point the token file at a mode-600 file whose
+# first line is the bot token. Never inline token values here.
+#Environment=AUTH_WATCH_TELEGRAM_TOKEN_FILE=%h/.config/openclaw-express-bridge/telegram-token
+#Environment=AUTH_WATCH_TELEGRAM_CHAT_ID=123456789
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%S/openclaw-express-bridge

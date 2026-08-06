@@ -1,5 +1,29 @@
 # Release notes
 
+## 1.1.20
+
+- Adds `tools/patch-client-disable-hard-reloads.mjs`. The official client's
+  memory cleaner schedules a daily hard renderer reload plus another one on
+  high memory usage; in headless deployments those reloads can discard the
+  authenticated session while the process stays `running`. The tool patches
+  `startMemoryCleaner()` inside `resources/app.asar` to keep only the safe
+  cache cleaner, backs up the original archive, verifies the repacked result,
+  swaps it atomically, and supports `--restore`. Re-apply after every client
+  update.
+- Adds an authentication watchdog (`lib/express-auth-watch.sh` plus the
+  `openclaw-express-auth-watch` service and timer). It counts recent
+  `not authenticated` gateway log entries once per minute, alerts once when a
+  threshold is crossed — optionally via Telegram, with the bot token read
+  from a file referenced by environment — and sends a single recovery notice
+  when the errors stop. Process liveness alone is no longer treated as
+  channel health.
+- Installs and enables packaged `.timer` units alongside `.service` units;
+  uninstall removes them.
+- Adds `RUNBOOK-AUTH-RECOVERY.md`: diagnosis, manual GUI re-login through a
+  temporary VNC, keyring persistence verification via one controlled restart,
+  and the dead ends already ruled out (auto-restarting a logged-out client;
+  process-only health checks).
+
 ## 1.1.19
 
 - Ships eXpress plugin 2.4.0. Idle monitoring no longer rotates the active

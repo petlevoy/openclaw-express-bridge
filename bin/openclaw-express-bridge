@@ -96,10 +96,11 @@ install_plugin() {
 
 install_units() {
   install -d -m 755 "$UNIT_DIR"
-  install -m 644 "$RUNTIME_HOME/systemd/"*.service "$UNIT_DIR/"
+  install -m 644 "$RUNTIME_HOME/systemd/"*.service "$RUNTIME_HOME/systemd/"*.timer "$UNIT_DIR/"
   systemctl --user daemon-reload
   systemctl --user enable openclaw-express-xvfb.service \
     openclaw-express-keyring.service openclaw-express-client.service >/dev/null
+  systemctl --user enable openclaw-express-auth-watch.timer >/dev/null
 }
 
 init_data() {
@@ -423,8 +424,9 @@ cmd_uninstall() {
   rm -f "$SWITCH_PATH"
   openclaw config set channels.express.desktopOutboundEnabled false --strict-json >/dev/null 2>&1 || true
   systemctl --user disable --now openclaw-express-client.service openclaw-express-keyring.service \
-    openclaw-express-xvfb.service >/dev/null 2>&1 || true
-  rm -f "$UNIT_DIR"/openclaw-express-{client,keyring,xvfb}.service
+    openclaw-express-xvfb.service openclaw-express-auth-watch.timer >/dev/null 2>&1 || true
+  rm -f "$UNIT_DIR"/openclaw-express-{client,keyring,xvfb}.service \
+    "$UNIT_DIR"/openclaw-express-auth-watch.{service,timer}
   systemctl --user daemon-reload 2>/dev/null || true
   openclaw plugins disable openclaw-express >/dev/null 2>&1 || true
   if [[ -d "$BRIDGE_HOME/install-backup/openclaw-express" ]]; then
