@@ -14,7 +14,10 @@ import {
   desktopPollSliceMs,
   DesktopReplyDeliveryTracker,
   desktopStatePathForChat,
+  isDesktopChatCommandMessage,
+  isDesktopComposerBlockedDelivery,
   isDesktopPriorityAbortMessage,
+  normalizeDesktopMediaUrls,
   processDesktopInboundEvent,
   resolveDesktopDurableTextDelivery,
   selectDesktopDueChats,
@@ -50,6 +53,25 @@ describe("desktop inbound event isolation", () => {
 
     tracker.observe("final", {});
     expect(() => tracker.assertFinalVisible(true)).not.toThrow();
+  });
+
+  it("treats chat commands as self-delivering and ordinary text as not", () => {
+    const asText = (text: string) => ({
+      ...message("777", "text"),
+      text,
+    });
+    expect(isDesktopChatCommandMessage(asText("/status"))).toBe(true);
+    expect(isDesktopChatCommandMessage(asText("  /model gpt  "))).toBe(true);
+    expect(isDesktopChatCommandMessage(asText("почему так?"))).toBe(false);
+    expect(isDesktopChatCommandMessage(asText("/home/petlevoy/file"))).toBe(
+      false,
+    );
+    expect(
+      isDesktopChatCommandMessage({
+        ...message("778", "document"),
+        text: "/status",
+      }),
+    ).toBe(false);
   });
 
   it("requires exact peer bindings and resolves a distinct session per chat", () => {
@@ -131,6 +153,15 @@ describe("desktop inbound event isolation", () => {
     expect(
       resolveDesktopDurableTextDelivery(chatId, { text: "progress" }, "tool"),
     ).toBe(false);
+  });
+
+  it("deduplicates MEDIA paths exposed through both payload fields", () => {
+    expect(
+      normalizeDesktopMediaUrls({
+        mediaUrl: "/tmp/report.pdf",
+        mediaUrls: ["/tmp/report.pdf", " /tmp/preview.png ", ""],
+      }),
+    ).toEqual(["/tmp/report.pdf", "/tmp/preview.png"]);
   });
 
   it("recognizes only standalone text abort commands as priority events", () => {
@@ -317,6 +348,33 @@ describe("desktop inbound event isolation", () => {
       processDesktopInboundEvent({ message: inbound, store, work }),
     ).resolves.toBe("quarantined");
     expect(store.has(inbound.id)).toBe(true);
+  });
+
+  it("defers a composer interlock without consuming the quarantine budget", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "express-composer-test-"));
+    const store = new DesktopDedupeStore(join(directory, "state.json"));
+    await store.load();
+    const inbound = message("31", "text");
+    const work = async () => {
+      throw new DesktopInboundReplyDeliveryError(
+        "desktop eXpress composer has pending attachments",
+      );
+    };
+
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      await expect(
+        processDesktopInboundEvent({ message: inbound, store, work }),
+      ).resolves.toBe("retry");
+    }
+    expect(store.has(inbound.id)).toBe(false);
+    expect(store.hasInboundClaim(inbound.id)).toBe(false);
+    expect(
+      isDesktopComposerBlockedDelivery(
+        new DesktopInboundReplyDeliveryError(
+          "desktop eXpress composer has pending attachments",
+        ),
+      ),
+    ).toBe(true);
   });
 
   it("still reconnects on transport or OpenClaw dispatch failure", async () => {

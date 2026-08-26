@@ -1,5 +1,36 @@
 # Release notes
 
+## 1.1.21
+
+- Ships eXpress plugin 2.4.4 and restores outbound file delivery on official
+  Linux client 3.68.44. Every generated type now reaches the chat: `jpeg`/`png`,
+  `pdf`, `docx`, `xlsx`, `pptx` and `md`.
+- Documents the client build the bridge is verified against. `README.md` gains
+  an "eXpress client compatibility" section listing the exact DOM and handler
+  contract 3.68.44 exposes, so a client update is re-verified deliberately
+  instead of surfacing as a silent stalled send.
+- Fixes send-control resolution. The client renders several buttons in
+  `.message-input__actions` (voice record, BotX, send); the previous code
+  required exactly one and therefore never clicked, timing out after 50 polls
+  with `desktop outbound file was not ready in the official client composer`.
+  The control is now resolved by the `icon-button--bg-primary` class.
+- Adds the second staging shape. Documents stage as an `.input-attachment__file`
+  chip and keep the file in the hidden input; images and video empty the input
+  and open the full-screen `.attachment-dialog` editor whose send control sits
+  in the composer outside the dialog. Both shapes are accepted, and the
+  busy-composer guard now also treats an open dialog as busy.
+- Clears the hidden file input the client leaves behind. Removing an attachment
+  in the UI does not empty `input[type=file]`, and a stale entry renders no chip
+  at all — the composer looks empty while every later send is rejected with
+  `desktop eXpress composer has pending attachments`, surviving a full client
+  restart. The bridge now discards staged state after success, after failure,
+  and once as self-repair before refusing a send.
+- Reports diagnostics on a failed send: staging mode, button count, staged file
+  name/size and dialog state are attached to the error instead of a bare
+  timeout.
+- Corrects the version banner and manifest, which stayed at 2.4.1 while
+  `package.json` moved on, so the running build was unidentifiable in the log.
+
 ## 1.1.20
 
 - Adds `tools/patch-client-disable-hard-reloads.mjs`. The official client's

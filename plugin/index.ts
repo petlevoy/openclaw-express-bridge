@@ -18,7 +18,7 @@ const plugin = {
     api.registerChannel({ plugin: expressPlugin });
     registerExpressToolConcurrencyGuard(api, 3);
     api.logger.info(
-      "eXpress channel plugin registered (BotX + desktop bridge v2.4.0; privacy-safe delivery journal, idle chat-list watch, cached final redelivery, exact peer routing, watchdog and cross-process UI mutex active)",
+      "eXpress channel plugin registered (BotX + desktop bridge v2.4.4; chip and dialog attachment staging for official client 3.68.44, media de-duplication, deferred composer interlocks, cached final redelivery, exact peer routing, watchdog and cross-process UI mutex active)",
     );
   },
 };

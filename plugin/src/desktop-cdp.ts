@@ -521,6 +521,42 @@ export function desktopInputSelectorFor(kind: DesktopOutboundKind): string {
   return DESKTOP_DOCUMENT_INPUT_SELECTOR;
 }
 
+/**
+ * Shared browser-side helpers for composer staging. The official client
+ * (verified against build 3.68.44) exposes two different staging shapes:
+ *
+ * - documents keep the picked file in the hidden input and render an
+ *   `.input-attachment__file` chip inside `.message-input`;
+ * - images and video empty the input and open a full-screen
+ *   `.attachment-dialog` editor whose footer hosts its own composer.
+ *
+ * The send control is the last enabled primary icon button of the active
+ * scope; the action row also carries voice-record and BotX buttons, so the
+ * count of buttons must never be assumed.
+ */
+const DESKTOP_COMPOSER_HELPERS_SNIPPET = `
+    const attachmentDialog = () => document.querySelector('.attachment-dialog');
+    const stagedAttachmentState = (input) => {
+      // The editor dialog renders above the chat, but the composer that owns
+      // the send control stays outside it, so the scope stays the document.
+      if (attachmentDialog()) return { mode: 'dialog', scope: document };
+      const chips = document.querySelectorAll('.message-input .input-attachment__file');
+      if (chips.length === 1 && input?.files?.length === 1) {
+        return { mode: 'chip', scope: document };
+      }
+      return { mode: 'none', scope: document };
+    };
+    const findSendControl = (scope) => {
+      const buttons = [...(scope || document).querySelectorAll('.message-input__actions button')];
+      const primary = buttons.filter((button) =>
+        String(button.className ?? '').includes('icon-button--bg-primary'),
+      );
+      const enabled = primary.filter((button) => !button.disabled);
+      if (enabled.length > 0) return enabled[enabled.length - 1];
+      if (primary.length > 0) return primary[primary.length - 1];
+      return buttons.length === 1 ? buttons[0] : null;
+    };`;
+
 export function buildDesktopSendFileExpression(
   kind: DesktopOutboundKind,
   fileName: string,
@@ -529,31 +565,98 @@ export function buildDesktopSendFileExpression(
   const inputSelector = JSON.stringify(desktopInputSelectorFor(kind));
   const expectedName = JSON.stringify(fileName);
   return `(() => {
+    ${DESKTOP_COMPOSER_HELPERS_SNIPPET}
     const input = document.querySelector(${inputSelector});
-    const attachments = document.querySelectorAll('.message-input .input-attachment__file');
-    const buttons = document.querySelectorAll('.message-input__actions button');
-    const selected = input?.files?.[0];
-    if (
-      input?.files?.length !== 1 ||
-      selected?.name !== ${expectedName} ||
-      selected?.size !== ${fileSize} ||
-      attachments.length !== 1 ||
-      buttons.length !== 1 ||
-      buttons[0].disabled
-    ) {
+    const staged = stagedAttachmentState(input);
+    // Official client 3.68 stages documents as a chip inside the composer and
+    // keeps the file in the input, but routes images and video through a
+    // full-screen ".attachment-dialog" editor that empties the input first.
+    // Both shapes are accepted; the delivery itself is still confirmed against
+    // the chat transcript afterwards.
+    if (staged.mode === 'chip') {
+      const selected = input?.files?.[0];
+      if (selected?.name !== ${expectedName} || selected?.size !== ${fileSize}) {
+        return false;
+      }
+    } else if (staged.mode !== 'dialog') {
       return false;
     }
-    buttons[0].click();
+    const send = findSendControl(staged.scope);
+    if (!send || send.disabled) return false;
+    send.click();
     return true;
   })()`;
 }
 
-function buildDesktopComposerHasNoAttachmentsExpression(): string {
+export function buildDesktopSendFileDiagnosticsExpression(
+  kind: DesktopOutboundKind,
+  fileName: string,
+  fileSize: number,
+): string {
+  const inputSelector = JSON.stringify(desktopInputSelectorFor(kind));
+  const expectedName = JSON.stringify(fileName);
+  return `(() => {
+    ${DESKTOP_COMPOSER_HELPERS_SNIPPET}
+    const input = document.querySelector(${inputSelector});
+    const staged = stagedAttachmentState(input);
+    const send = findSendControl(staged.scope);
+    const selected = input?.files?.[0];
+    return JSON.stringify({
+      stagingMode: staged.mode,
+      inputFound: Boolean(input),
+      stagedFiles: input?.files?.length ?? null,
+      stagedName: selected?.name ?? null,
+      expectedName: ${expectedName},
+      stagedSize: selected?.size ?? null,
+      expectedSize: ${fileSize},
+      attachmentNodes: document.querySelectorAll('.message-input .input-attachment__file').length,
+      dialogOpen: Boolean(attachmentDialog()),
+      actionButtons: [...(staged.scope || document).querySelectorAll('.message-input__actions button')].length,
+      sendFound: Boolean(send),
+      sendDisabled: send ? Boolean(send.disabled) : null,
+    });
+  })()`;
+}
+
+/**
+ * The composer is only free when no chip is rendered, no file is left in a
+ * hidden input and no attachment dialog is open. The dialog matters because
+ * the official client keeps it modal over the chat: any send attempted while
+ * it is open would either target the dialog or be dropped.
+ */
+export function buildDesktopComposerHasNoAttachmentsExpression(): string {
   return `(() => (
+    !document.querySelector('.attachment-dialog') &&
     document.querySelectorAll('.message-input .input-attachment__file').length === 0 &&
     [...document.querySelectorAll('.message-input input[type="file"]')]
       .every((input) => !input.files || input.files.length === 0)
   ))()`;
+}
+
+/**
+ * Undo a staging attempt. The official client does NOT empty the hidden file
+ * input when an attachment is removed from the composer, so the input must be
+ * cleared explicitly - otherwise every later send is rejected by the
+ * pending-attachment guard, which is exactly how this channel wedged itself
+ * between 19 and 26 August 2026.
+ */
+export function buildDesktopDiscardStagedAttachmentExpression(): string {
+  return `(() => {
+    const dialog = document.querySelector('.attachment-dialog');
+    if (dialog) {
+      const header = dialog.querySelector('.attachment-dialog-header');
+      const close = header && header.querySelector('button');
+      if (close) close.click();
+    }
+    for (const chip of document.querySelectorAll('.message-input .input-attachment__file')) {
+      const remove = chip.querySelector('button');
+      if (remove) remove.click();
+    }
+    for (const input of document.querySelectorAll('.message-input input[type="file"]')) {
+      if (input.files && input.files.length > 0) input.value = '';
+    }
+    return true;
+  })()`;
 }
 
 function desktopMessageTypeForOutboundKind(
@@ -1109,6 +1212,50 @@ export function buildOpenChatExpression(chatId: string): string {
       }
     }
     return 'missing';
+  })()`;
+}
+
+/**
+ * Read-only check that the composer still holds exactly the text we staged.
+ * Used before clearing a failed send so a message the human typed in the
+ * meantime is never wiped. Mirrors the component/chat checks of the send
+ * expression but never invokes a native action.
+ */
+export function buildDesktopComposerTextMatchesExpression(
+  chatId: string,
+  text: string,
+): string {
+  const expectedChatId = JSON.stringify(chatId.toLowerCase());
+  const expectedText = JSON.stringify(text);
+  return `(() => {
+    const expectedChatId = ${expectedChatId};
+    const expectedText = ${expectedText};
+    const editor = document.querySelector('.slate-message-input[contenteditable="true"]');
+    if (!editor) return false;
+    const fiberKey = Object.getOwnPropertyNames(editor)
+      .find((key) => key.startsWith('__reactFiber$'));
+    let fiber = fiberKey ? editor[fiberKey] : null;
+    for (let index = 0; fiber && index < 40; index += 1, fiber = fiber.return) {
+      const componentName = String(
+        fiber.elementType?.displayName ||
+        fiber.elementType?.name ||
+        fiber.type?.displayName ||
+        fiber.type?.name ||
+        '',
+      );
+      const instance = fiber.stateNode;
+      if (componentName !== 'ChatInputText' || !instance) continue;
+      if (String(instance.props?.chat?.groupChatId || '').toLowerCase() !== expectedChatId) {
+        return false;
+      }
+      if (typeof instance.getMessage !== 'function') return false;
+      const message = instance.getMessage();
+      const actualText = String(message?.text || '')
+        .replace(/\\r\\n/g, '\\n')
+        .replace(/\\n$/, '');
+      return actualText === expectedText.replace(/\\r\\n/g, '\\n');
+    }
+    return false;
   })()`;
 }
 
@@ -1776,7 +1923,10 @@ export class ExpressDesktopClient {
         "desktop outbound message was not confirmed by the official client",
       );
     } catch (error) {
-      if (!(await this.recoverRendererIfNeededUnlocked())) throw error;
+      if (!(await this.recoverRendererIfNeededUnlocked())) {
+        await this.discardStagedComposerTextUnlocked(target.chatId, safeText);
+        throw error;
+      }
       const afterRecovery = await this.ensureTargetActive(target.chatId, false);
       const messageId = confirmedDesktopOutboundTextMessageId(
         before,
@@ -1789,6 +1939,30 @@ export class ExpressDesktopClient {
       throw new Error(
         "desktop outbound delivery state is unknown after renderer recovery; message was not retried",
       );
+    }
+  }
+
+  /**
+   * A failed send leaves the staged text in the official composer, where the
+   * client persists it as a chat draft. Clear it, but only while it still is
+   * byte-for-byte our own staged text: anything the human typed meanwhile
+   * must survive. Cleanup failures are swallowed so the original send error
+   * stays the reported cause.
+   */
+  private async discardStagedComposerTextUnlocked(
+    targetChatId: string,
+    stagedText: string,
+  ): Promise<void> {
+    try {
+      const stillStaged = await this.evaluate<boolean>(
+        buildDesktopComposerTextMatchesExpression(targetChatId, stagedText),
+      );
+      if (!stillStaged) return;
+      await this.evaluate<DesktopPrepareTextResult>(
+        buildDesktopPrepareTextExpression(targetChatId, ""),
+      );
+    } catch {
+      // Best effort only.
     }
   }
 
@@ -1995,7 +2169,20 @@ export class ExpressDesktopClient {
         buildDesktopComposerHasNoAttachmentsExpression(),
       ))
     ) {
-      throw new Error("desktop eXpress composer has pending attachments");
+      // Leftovers here are ours, not the user's: the official client hides the
+      // stale file inside the hidden input with no chip rendered, so nobody can
+      // clear it from the UI and a client restart does not drop it either. Undo
+      // it once and retry the check instead of wedging the whole channel.
+      await this.evaluate<boolean>(
+        buildDesktopDiscardStagedAttachmentExpression(),
+      );
+      if (
+        !(await this.evaluate<boolean>(
+          buildDesktopComposerHasNoAttachmentsExpression(),
+        ))
+      ) {
+        throw new Error("desktop eXpress composer has pending attachments");
+      }
     }
 
     const rpc = this.requireRpc();
@@ -2033,38 +2220,114 @@ export class ExpressDesktopClient {
       this.timeoutMs,
     );
 
-    let dispatched = false;
-    for (let attempt = 0; attempt < 50; attempt += 1) {
-      await new Promise((resolvePromise) => setTimeout(resolvePromise, 100));
-      dispatched = await this.evaluate<boolean>(
-        buildDesktopSendFileExpression(
-          file.kind,
-          basename(file.path),
-          file.size,
-        ),
-      );
-      if (dispatched) break;
-    }
-    if (!dispatched) {
-      throw new Error(
-        "desktop outbound file was not ready in the official client composer",
-      );
-    }
+    // Everything past this point runs with our file staged in the official
+    // composer. Any escape without clearing it leaves the client in a state
+    // where the pending-attachment guard rejects every later text and file
+    // send, so the whole channel stays wedged until a human clears it.
+    try {
+      let dispatched = false;
+      for (let attempt = 0; attempt < 50; attempt += 1) {
+        await new Promise((resolvePromise) => setTimeout(resolvePromise, 100));
+        dispatched = await this.evaluate<boolean>(
+          buildDesktopSendFileExpression(
+            file.kind,
+            basename(file.path),
+            file.size,
+          ),
+        );
+        if (dispatched) break;
+      }
+      if (!dispatched) {
+        let details = "";
+        try {
+          const raw = await this.evaluate<string>(
+            buildDesktopSendFileDiagnosticsExpression(
+              file.kind,
+              basename(file.path),
+              file.size,
+            ),
+          );
+          if (typeof raw === "string" && raw) details = ` (${raw})`;
+        } catch {
+          // Diagnostics are best effort; never mask the original failure.
+        }
+        throw new Error(
+          `desktop outbound file was not ready in the official client composer${details}`,
+        );
+      }
 
-    for (let attempt = 0; attempt < 80; attempt += 1) {
-      await new Promise((resolvePromise) => setTimeout(resolvePromise, 250));
-      const after = await this.snapshotUnlocked();
-      this.assertSnapshotAllowed(after, target.chatId);
-      const messageId = confirmedDesktopOutboundFileMessageId(
-        before,
-        after,
-        file,
+      for (let attempt = 0; attempt < 80; attempt += 1) {
+        await new Promise((resolvePromise) => setTimeout(resolvePromise, 250));
+        const after = await this.snapshotUnlocked();
+        this.assertSnapshotAllowed(after, target.chatId);
+        const messageId = confirmedDesktopOutboundFileMessageId(
+          before,
+          after,
+          file,
+        );
+        if (messageId) {
+          // The official client leaves the delivered file inside the hidden
+          // input; leaving it there would wedge every later send.
+          await this.evaluate<boolean>(
+            buildDesktopDiscardStagedAttachmentExpression(),
+          ).catch(() => undefined);
+          return messageId;
+        }
+      }
+      throw new Error(
+        "desktop outbound file was not confirmed by the official client",
       );
-      if (messageId) return messageId;
+    } catch (error) {
+      await this.discardStagedComposerAttachmentUnlocked(nodeId);
+      throw error;
     }
-    throw new Error(
-      "desktop outbound file was not confirmed by the official client",
-    );
+  }
+
+  /**
+   * Drop an attachment this client staged but never confirmed. Emptying the
+   * file input is enough when the official component has not picked it up
+   * yet; once it has rendered an attachment chip, only a renderer reload
+   * clears it. Cleanup failures are swallowed so the send error stays the
+   * reported cause.
+   */
+  private async discardStagedComposerAttachmentUnlocked(
+    nodeId: number,
+  ): Promise<void> {
+    try {
+      await this.requireRpc().request(
+        "DOM.setFileInputFiles",
+        { files: [], nodeId },
+        this.timeoutMs,
+      );
+      if (
+        await this.evaluate<boolean>(
+          buildDesktopComposerHasNoAttachmentsExpression(),
+        )
+      ) {
+        return;
+      }
+      // Close the attachment dialog, drop rendered chips and empty every
+      // hidden input before falling back to the much heavier renderer reload.
+      await this.evaluate<boolean>(
+        buildDesktopDiscardStagedAttachmentExpression(),
+      );
+      for (let attempt = 0; attempt < 10; attempt += 1) {
+        await new Promise((resolvePromise) => setTimeout(resolvePromise, 200));
+        if (
+          await this.evaluate<boolean>(
+            buildDesktopComposerHasNoAttachmentsExpression(),
+          )
+        ) {
+          return;
+        }
+        await this.evaluate<boolean>(
+          buildDesktopDiscardStagedAttachmentExpression(),
+        );
+      }
+      await this.reloadRendererUnlocked();
+    } catch {
+      // Best effort only.
+    }
   }
 
   private resolveTarget(targetChatId?: string): DesktopChatTarget {

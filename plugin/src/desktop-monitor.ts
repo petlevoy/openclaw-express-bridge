@@ -65,6 +65,15 @@ export class DesktopInboundReplyDeliveryError extends Error {
   }
 }
 
+export function isDesktopComposerBlockedDelivery(
+  error: unknown,
+): error is DesktopInboundReplyDeliveryError {
+  return (
+    error instanceof DesktopInboundReplyDeliveryError &&
+    error.detail === "desktop eXpress composer has pending attachments"
+  );
+}
+
 export class DesktopReplyDeliveryTracker {
   private finalVisible = false;
 
@@ -279,6 +288,21 @@ export function isDesktopPriorityAbortMessage(
 }
 
 /**
+ * Chat commands are answered by the command layer through the durable
+ * outbound queue, so the turn itself queues no reply payload and the
+ * dispatcher never reports a visible final. Demanding one marked delivered
+ * command output as failed and re-ran the inbound event, which executed the
+ * command again and posted the same answer twice.
+ */
+export function isDesktopChatCommandMessage(message: DesktopMessage): boolean {
+  return (
+    message.type === "text" &&
+    !message.attachment &&
+    /^\/[A-Za-z][\w-]*(\s|$)/.test((message.text ?? "").trim())
+  );
+}
+
+/**
  * Isolate a poison attachment from the CDP connection. Attachment failures
  * receive a bounded durable retry and then only that message id is skipped.
  * Transport or OpenClaw dispatch failures remain retryable.
@@ -291,6 +315,15 @@ export async function processDesktopInboundEvent(
     await options.store.add(options.message.id);
     return "delivered";
   } catch (error) {
+    // A human draft or an attachment left by an earlier bridge build can keep
+    // the official composer occupied. This is a transient delivery interlock,
+    // not a poison inbound event: consuming the three-attempt budget here
+    // quarantined a perfectly valid user message in under two seconds.
+    if (isDesktopComposerBlockedDelivery(error)) {
+      await options.store.releaseInboundClaim(options.message.id);
+      options.onDiagnostic?.("retry", 0, error.detail);
+      return "retry";
+    }
     if (
       !(error instanceof DesktopInboundAttachmentError) &&
       !(error instanceof DesktopInboundReplyDeliveryError)
@@ -886,12 +919,24 @@ function toCachedReply(payload: {
   mediaUrl?: string;
   mediaUrls?: string[];
 }): DesktopCachedReply {
-  const mediaUrls = payload.mediaUrls?.length
-    ? payload.mediaUrls
-    : payload.mediaUrl
-      ? [payload.mediaUrl]
-      : undefined;
+  const mediaUrls = normalizeDesktopMediaUrls(payload);
   return { text: payload.text, mediaUrls };
+}
+
+export function normalizeDesktopMediaUrls(payload: {
+  mediaUrl?: string;
+  mediaUrls?: string[];
+}): string[] | undefined {
+  const unique = [
+    ...(payload.mediaUrls ?? []),
+    ...(payload.mediaUrl ? [payload.mediaUrl] : []),
+  ]
+    .map((value) => value.trim())
+    .filter(
+      (value, index, values) =>
+        Boolean(value) && values.indexOf(value) === index,
+    );
+  return unique.length ? unique : undefined;
 }
 
 /**
@@ -920,11 +965,7 @@ async function deliverDesktopPayload(params: {
         ),
       )
     : [];
-  const media = payload.mediaUrls?.length
-    ? payload.mediaUrls
-    : payload.mediaUrl
-      ? [payload.mediaUrl]
-      : [];
+  const media = normalizeDesktopMediaUrls(payload) ?? [];
   if (!chunks.length && !media.length) return;
 
   await client.withUiLock(async () => {
@@ -1186,7 +1227,10 @@ async function dispatchDesktopInbound(
         },
       },
     });
-    deliveryTracker.assertFinalVisible(!isDesktopPriorityAbortMessage(message));
+    deliveryTracker.assertFinalVisible(
+      !isDesktopPriorityAbortMessage(message) &&
+        !isDesktopChatCommandMessage(message),
+    );
     return result;
   };
   if (activeSessions) {

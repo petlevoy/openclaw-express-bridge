@@ -17,6 +17,8 @@ import {
   buildDesktopAttachmentStartExpression,
   buildDesktopAttachmentStatusExpression,
   buildDesktopChatListDigestExpression,
+  buildDesktopComposerHasNoAttachmentsExpression,
+  buildDesktopDiscardStagedAttachmentExpression,
   buildDesktopPageStateExpression,
   buildDesktopPrepareTextExpression,
   buildDesktopSendFileExpression,
@@ -1575,6 +1577,152 @@ describe("eXpress desktop CDP bridge", () => {
     },
   );
 
+  it("clicks the primary send control when the composer renders a voice button too", () => {
+    const fileName = "report.docx";
+    const fileSize = 17_146;
+    let sendClicks = 0;
+    let voiceClicks = 0;
+    const voiceButton = {
+      className: "icon-button",
+      disabled: false,
+      click: () => {
+        voiceClicks += 1;
+      },
+    };
+    const sendButton = {
+      className: "icon-button icon-button--bg icon-button--bg-primary",
+      disabled: false,
+      click: () => {
+        sendClicks += 1;
+      },
+    };
+    const input = { files: [{ name: fileName, size: fileSize }] };
+    const documentFixture = {
+      querySelector: (selector: string) =>
+        selector === desktopInputSelectorFor("document") ? input : null,
+      querySelectorAll: (selector: string) => {
+        if (selector === ".message-input .input-attachment__file") return [{}];
+        if (selector === ".message-input__actions button") {
+          return [voiceButton, sendButton];
+        }
+        return [];
+      },
+    };
+    const run = () =>
+      Function(
+        "document",
+        `return (${buildDesktopSendFileExpression("document", fileName, fileSize)});`,
+      )(documentFixture) as boolean;
+
+    expect(run()).toBe(true);
+    expect(sendClicks).toBe(1);
+    expect(voiceClicks).toBe(0);
+
+    sendButton.disabled = true;
+    expect(run()).toBe(false);
+    expect(sendClicks).toBe(1);
+  });
+
+  it("sends through the attachment dialog when the client opens the image editor", () => {
+    // Official build 3.68 empties the input and opens ".attachment-dialog"
+    // for images, so the chip/staged-file checks must not gate the send.
+    const fileName = "preview.png";
+    const fileSize = 4_308;
+    let clicks = 0;
+    const dialogSend = {
+      className: "icon-button icon-button--bg icon-button--bg-primary",
+      disabled: false,
+      click: () => {
+        clicks += 1;
+      },
+    };
+    const dialog = { tag: "attachment-dialog" };
+    const emptiedInput = { files: [] as { name: string; size: number }[] };
+    const documentFixture = {
+      querySelector: (selector: string) => {
+        if (selector === ".attachment-dialog") return dialog;
+        if (selector === desktopInputSelectorFor("image")) return emptiedInput;
+        return null;
+      },
+      // The send control lives in the composer outside the dialog.
+      querySelectorAll: (selector: string) =>
+        selector === ".message-input__actions button" ? [dialogSend] : [],
+    };
+    const run = () =>
+      Function(
+        "document",
+        `return (${buildDesktopSendFileExpression("image", fileName, fileSize)});`,
+      )(documentFixture) as boolean;
+
+    expect(run()).toBe(true);
+    expect(clicks).toBe(1);
+
+    dialogSend.disabled = true;
+    expect(run()).toBe(false);
+    expect(clicks).toBe(1);
+  });
+
+  it("refuses to send when nothing is staged in either shape", () => {
+    const documentFixture = {
+      querySelector: (selector: string) =>
+        selector === desktopInputSelectorFor("document")
+          ? { files: [] as { name: string; size: number }[] }
+          : null,
+      querySelectorAll: () => [],
+    };
+    const dispatched = Function(
+      "document",
+      `return (${buildDesktopSendFileExpression("document", "report.docx", 17_146)});`,
+    )(documentFixture) as boolean;
+    expect(dispatched).toBe(false);
+  });
+
+  it("clears a stale hidden file that renders no chip and unblocks the guard", () => {
+    // Reproduces how the channel wedged between 19 and 26 August 2026: a file
+    // left in the hidden input by a failed send, with no chip and no dialog, so
+    // the composer looks empty in the UI and nobody can clear it by hand.
+    const stuckInput = {
+      value: "C:\\fakepath\\pamyatka.pdf",
+      files: [{ name: "pamyatka.pdf", size: 4_096 }] as {
+        name: string;
+        size: number;
+      }[],
+    };
+    const cleanInput = { value: "", files: [] as { name: string }[] };
+    const documentFixture = {
+      querySelector: () => null,
+      querySelectorAll: (selector: string) => {
+        if (selector === '.message-input input[type="file"]') {
+          return [cleanInput, stuckInput];
+        }
+        return [];
+      },
+    };
+    const guard = () =>
+      Function(
+        "document",
+        `return (${buildDesktopComposerHasNoAttachmentsExpression()});`,
+      )(documentFixture) as boolean;
+
+    expect(guard()).toBe(false);
+
+    Object.defineProperty(stuckInput, "value", {
+      set() {
+        stuckInput.files = [];
+      },
+      get() {
+        return "";
+      },
+    });
+    Function(
+      "document",
+      `return (${buildDesktopDiscardStagedAttachmentExpression()});`,
+    )(documentFixture);
+
+    expect(stuckInput.files).toHaveLength(0);
+    expect(guard()).toBe(true);
+  });
+
   it("confirms the actual new DOCX attachment instead of an unrelated own message", () => {
     const oldId = "00000000-0000-4000-8000-000000000041";
     const unrelatedTextId = "00000000-0000-4000-8000-000000000042";
@@ -2178,4 +2326,195 @@ describe("eXpress desktop quarantine ageing", () => {
     expect(health.quarantined).toBe(1);
     expect(store.has("fresh-one")).toBe(true);
   });
+  it("clears a composer left holding text after a failed send", async () => {
+    const chatId = "00000000-0000-4000-8000-000000000041";
+    const client = new ExpressDesktopClient({
+      cdpUrl: "http://127.0.0.1:18997",
+      chats: [{ chatId, chatTitle: "Approved" }],
+    });
+    const snapshot = {
+      authenticated: true,
+      chatId,
+      chatTitle: "Approved",
+      composerReady: true,
+      messages: [],
+      ownMessages: [],
+      lastOwnMessageId: null,
+    };
+    const internals = client as unknown as {
+      rpc: { request: () => Promise<unknown>; close: () => void };
+      evaluate: <T>(expression: string) => Promise<T>;
+    };
+    internals.rpc = {
+      request: async () => ({}),
+      close: () => undefined,
+    };
+    const staged: string[] = [];
+    internals.evaluate = async <T>(expression: string): Promise<T> => {
+      if (expression.includes("chat-message-row--opponent")) {
+        return snapshot as T;
+      }
+      if (expression.includes("rendererError")) {
+        return {
+          authenticated: true,
+          chatListReady: true,
+          rendererError: false,
+        } as T;
+      }
+      if (expression.includes("setInputText")) {
+        staged.push(
+          expression.includes('const expectedText = ""') ? "cleared" : "staged",
+        );
+        return "prepared" as T;
+      }
+      if (expression.includes("handleSendMessage()")) {
+        return "native-action-missing" as T;
+      }
+      if (expression.includes("getMessage()")) {
+        return true as T;
+      }
+      throw new Error(`unexpected expression: ${expression.slice(0, 60)}`);
+    };
+
+    await expect(client.sendText(chatId, "leftover draft")).rejects.toThrow(
+      /failed closed/,
+    );
+    expect(staged).toEqual(["staged", "cleared"]);
+  });
+
+  it("keeps composer text the human typed after a failed send", async () => {
+    const chatId = "00000000-0000-4000-8000-000000000042";
+    const client = new ExpressDesktopClient({
+      cdpUrl: "http://127.0.0.1:18997",
+      chats: [{ chatId, chatTitle: "Approved" }],
+    });
+    const snapshot = {
+      authenticated: true,
+      chatId,
+      chatTitle: "Approved",
+      composerReady: true,
+      messages: [],
+      ownMessages: [],
+      lastOwnMessageId: null,
+    };
+    const internals = client as unknown as {
+      rpc: { request: () => Promise<unknown>; close: () => void };
+      evaluate: <T>(expression: string) => Promise<T>;
+    };
+    internals.rpc = {
+      request: async () => ({}),
+      close: () => undefined,
+    };
+    const staged: string[] = [];
+    internals.evaluate = async <T>(expression: string): Promise<T> => {
+      if (expression.includes("chat-message-row--opponent")) {
+        return snapshot as T;
+      }
+      if (expression.includes("rendererError")) {
+        return {
+          authenticated: true,
+          chatListReady: true,
+          rendererError: false,
+        } as T;
+      }
+      if (expression.includes("setInputText")) {
+        staged.push(
+          expression.includes('const expectedText = ""') ? "cleared" : "staged",
+        );
+        return "prepared" as T;
+      }
+      if (expression.includes("handleSendMessage()")) {
+        return "native-action-missing" as T;
+      }
+      if (expression.includes("getMessage()")) {
+        return false as T;
+      }
+      throw new Error(`unexpected expression: ${expression.slice(0, 60)}`);
+    };
+
+    await expect(client.sendText(chatId, "our text")).rejects.toThrow(
+      /failed closed/,
+    );
+    expect(staged).toEqual(["staged"]);
+  });
+
+  it("drops a staged attachment when the file send never confirms", async () => {
+    const chatId = "00000000-0000-4000-8000-000000000043";
+    const client = new ExpressDesktopClient({
+      cdpUrl: "http://127.0.0.1:18997",
+      chats: [{ chatId, chatTitle: "Approved" }],
+    });
+    const directory = await mkdtemp(join(tmpdir(), "express-file-rollback-"));
+    const path = join(directory, "report.pdf");
+    await writeFile(path, "pdf", { mode: 0o600 });
+    const outboundFile = await validateDesktopOutboundFile(path, 10, [
+      directory,
+    ]);
+    const snapshot = {
+      authenticated: true,
+      chatId,
+      chatTitle: "Approved",
+      composerReady: true,
+      messages: [],
+      ownMessages: [],
+      lastOwnMessageId: null,
+    };
+    const requests: { method: string; params: Record<string, unknown> }[] = [];
+    const internals = client as unknown as {
+      rpc: {
+        request: (
+          method: string,
+          params: Record<string, unknown>,
+        ) => Promise<Record<string, unknown>>;
+        close: () => void;
+      };
+      evaluate: <T>(expression: string) => Promise<T>;
+    };
+    internals.rpc = {
+      request: async (method, params) => {
+        requests.push({ method, params });
+        if (method === "DOM.getDocument") return { root: { nodeId: 1 } };
+        if (method === "DOM.querySelector") return { nodeId: 7 };
+        return {};
+      },
+      close: () => undefined,
+    };
+    let attachmentChipPresent = false;
+    internals.evaluate = async <T>(expression: string): Promise<T> => {
+      if (expression.includes("chat-message-row--opponent")) {
+        return snapshot as T;
+      }
+      if (expression.includes("rendererError")) {
+        return {
+          authenticated: true,
+          chatListReady: true,
+          rendererError: false,
+        } as T;
+      }
+      if (expression.includes("input-attachment__file').length === 0")) {
+        return !attachmentChipPresent as T;
+      }
+      if (expression.includes("stagingMode")) {
+        return JSON.stringify({ stagingMode: "none", actionButtons: 2 }) as T;
+      }
+      if (expression.includes("input.value = ''")) {
+        return true as T;
+      }
+      if (expression.includes("send.click()")) {
+        attachmentChipPresent = true;
+        return false as T;
+      }
+      throw new Error(`unexpected expression: ${expression.slice(0, 60)}`);
+    };
+
+    await expect(client.sendFile(chatId, outboundFile)).rejects.toThrow(
+      /was not ready/,
+    );
+    const fileInputCalls = requests.filter(
+      (entry) => entry.method === "DOM.setFileInputFiles",
+    );
+    expect(fileInputCalls).toHaveLength(2);
+    expect(fileInputCalls[1]?.params).toEqual({ files: [], nodeId: 7 });
+    expect(requests.some((entry) => entry.method === "Page.reload")).toBe(true);
+  }, 20_000);
 });

@@ -1,4 +1,4 @@
-# openclaw-express-bridge 1.1.18
+# openclaw-express-bridge 1.1.21
 
 `openclaw-express-bridge` is an enterprise AI integration layer that connects
 OpenClaw agents to on-premises eXpress deployments through the official Linux
@@ -29,6 +29,38 @@ The package installs a **headless/lightweight runtime**: no visible desktop is
 required after login. It still uses the unmodified official AppImage; it does
 not reimplement eXpress encryption or its private protocol.
 
+## eXpress client compatibility
+
+| Bridge | Plugin | Official eXpress Linux client |
+| --- | --- | --- |
+| 1.1.21 | 2.4.4 | **3.68.44** (verified) |
+| 1.1.19 – 1.1.20 | 2.4.0 – 2.4.3 | 3.68.44 (partially; outbound files fail before 2.4.3) |
+| 1.1.18 and earlier | 2.3.x | 3.66.x |
+
+The bridge drives the unmodified official client through the Chrome DevTools
+Protocol, so it depends on that build's DOM and on its React handler names. Both
+are verified against **3.68.44** and are pinned by `install-client`, which
+downloads exactly that version and checks its SHA-256.
+
+Client-contract points the bridge relies on in 3.68.44:
+
+- documents (`pdf`, `doc/docx`, `xls/xlsx`, `ppt/pptx`, `md` and other
+  non-media types) stage as an `.input-attachment__file` chip inside
+  `.message-input` and stay in the hidden file input;
+- images and video instead empty that input and open the full-screen
+  `.attachment-dialog` editor, whose send control lives in the composer
+  *outside* the dialog;
+- `.message-input__actions` holds several buttons (voice record, BotX, send),
+  so the send control is resolved by the `icon-button--bg-primary` class and
+  never by button count;
+- removing an attachment in the UI does **not** clear the hidden file input, so
+  the bridge clears it itself after every send, after every failure and before
+  every new staging attempt.
+
+Run the bridge against a different client build only after re-verifying those
+points: a client update can change the markup without any bridge error other
+than a stalled send.
+
 ## Artifact variants
 
 1. **Redistributable** `.deb` and `.tar.gz`: bridge, plugin, units and tools;
@@ -48,7 +80,7 @@ grant was found in the client payload.
 Debian package:
 
 ```bash
-sudo apt install ./openclaw-express-bridge_1.1.18_amd64.deb
+sudo apt install ./openclaw-express-bridge_1.1.21_amd64.deb
 openclaw-express-bridge install
 openclaw-express-bridge install-client
 ```
@@ -56,8 +88,8 @@ openclaw-express-bridge install-client
 Portable archive:
 
 ```bash
-tar -xzf openclaw-express-bridge-1.1.18-linux-amd64.tar.gz
-cd openclaw-express-bridge-1.1.18
+tar -xzf openclaw-express-bridge-1.1.21-linux-amd64.tar.gz
+cd openclaw-express-bridge-1.1.21
 ./install.sh
 ~/.local/bin/openclaw-express-bridge install-client
 ```
@@ -389,7 +421,7 @@ streaming. Non-loopback CTS endpoints must use HTTPS.
 
 ## Feature scope matrix
 
-| Requirement | 1.1.18 state |
+| Requirement | 1.1.21 state |
 |---|---|
 | Native OpenClaw channel lifecycle | Implemented |
 | Default/named account configuration | Implemented; multiple chats share one serialized desktop client/CDP session |
